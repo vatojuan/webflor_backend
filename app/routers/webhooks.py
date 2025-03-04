@@ -26,10 +26,14 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Configurar Google Cloud Storage
-storage_client = storage.Client()
+#storage_client = storage.Client()
+#BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
+#if not BUCKET_NAME:
+#    raise Exception("GOOGLE_STORAGE_BUCKET no está definido")
+# Configuración de Google Cloud Storage
+service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
+storage_client = storage.Client.from_service_account_info(service_account_info)
 BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
-if not BUCKET_NAME:
-    raise Exception("GOOGLE_STORAGE_BUCKET no está definido")
 
 router = APIRouter(
     prefix="/webhooks",
