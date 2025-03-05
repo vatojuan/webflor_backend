@@ -32,7 +32,7 @@ def send_confirmation_email(user_email, confirmation_code):
     body = (
         f"Hola,\n\n"
         f"Para confirmar tu cuenta, haz clic en el siguiente enlace:\n"
-        f"http://localhost:3000/cv/confirm?code={confirmation_code}\n\n"
+        f"http://fapmendoza.online/cv/confirm?code={confirmation_code}\n\n"
         f"Si no solicitaste este registro, puedes ignorar este mensaje.\n\n"
         f"Saludos,\nEl equipo de FAP Mendoza"
     )

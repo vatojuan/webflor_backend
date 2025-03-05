@@ -84,6 +84,10 @@ async def upload_cv(background_tasks: BackgroundTasks, file: UploadFile = File(.
             raise HTTPException(status_code=400, detail="No se encontró un email válido en el CV")
         print(f"✅ Email extraído: {user_email}")
 
+        # Convertir el email a minúsculas
+        user_email = user_email.lower()
+        print(f"✅ Email convertido a minúsculas: {user_email}")
+
         # Generar un código de confirmación único
         confirmation_code = str(uuid.uuid4())
         print(f"✅ Código de confirmación generado: {confirmation_code}")

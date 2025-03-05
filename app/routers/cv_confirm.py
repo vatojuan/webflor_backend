@@ -18,11 +18,6 @@ import bcrypt
 load_dotenv()
 
 # Configuración de Google Cloud Storage
-
-
-#storage_client = storage.Client()
-
-# Configuración de Google Cloud Storage
 service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
 storage_client = storage.Client.from_service_account_info(service_account_info)
 BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
@@ -108,6 +103,9 @@ async def confirm_email(code: str = Query(...)):
         if not user_data:
             raise HTTPException(status_code=400, detail="Código de confirmación inválido")
         user_email, cv_url = user_data
+        
+        # Convertir el email a minúsculas para mantener la consistencia
+        user_email = user_email.lower()
         print(f"✅ Registro encontrado para {user_email} con CV URL: {cv_url}")
 
         # Mover el archivo de "pending_cv_uploads" a "employee-documents"
