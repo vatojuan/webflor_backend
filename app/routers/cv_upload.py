@@ -37,7 +37,7 @@ def get_db_connection():
         user=os.getenv("USER", "postgres.apnfioxjddccokgkljvd"),
         password=os.getenv("PASSWORD", "Pachamama190"),
         host=os.getenv("HOST", "aws-0-sa-east-1.pooler.supabase.com"),
-        port=os.getenv("PORT", "5432"),
+        port=5432,  # Fijo en 5432
         sslmode="require"
     )
 
