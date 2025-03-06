@@ -9,9 +9,10 @@ app = FastAPI()
 # Habilitar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://fapmendoza.online"],  # Permite el frontend
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["https://fapmendoza.online", "https://webfloradmin-vatojuans-projects.vercel.app"],
+    allow_credentials=True,
+    allow_methods=["*"],  # Permite todos los métodos (GET, POST, etc.)
+    allow_headers=["*"],  # Permite todos los headers
 )
 
 # Registrar routers
