@@ -16,12 +16,6 @@ from app.email_utils import send_confirmation_email
 load_dotenv()
 
 # Configuración de Google Cloud Storage
-#storage_client = storage.Client()
-#BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
-#if not BUCKET_NAME:
-#    raise Exception("GOOGLE_STORAGE_BUCKET no está definido")
-
-# Configuración de Google Cloud Storage
 service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
 storage_client = storage.Client.from_service_account_info(service_account_info)
 BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
@@ -57,6 +51,14 @@ def extract_email(text):
     emails = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)
     return emails[0] if emails else None
 
+def sanitize_filename(filename: str) -> str:
+    """Reemplaza espacios por guiones bajos y elimina caracteres problemáticos."""
+    # Reemplaza espacios por guiones bajos
+    filename = filename.replace(" ", "_")
+    # Opcional: eliminar caracteres no permitidos (deja solo letras, números, guiones, guiones bajos y puntos)
+    filename = re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
+    return filename
+
 @router.post("/upload")
 async def upload_cv(background_tasks: BackgroundTasks, file: UploadFile = File(...), email: str = Form(None)):
     try:
@@ -64,9 +66,13 @@ async def upload_cv(background_tasks: BackgroundTasks, file: UploadFile = File(.
         file_bytes = await file.read()
         print(f"✅ Archivo recibido: {file.filename}, tamaño: {len(file_bytes)} bytes")
 
+        # Normalizar el nombre del archivo
+        safe_filename = sanitize_filename(file.filename)
+        print(f"✅ Nombre del archivo normalizado: {safe_filename}")
+
         # Subir el archivo a GCS en la carpeta "pending_cv_uploads/"
         bucket = storage_client.bucket(BUCKET_NAME)
-        blob = bucket.blob(f"pending_cv_uploads/{file.filename}")
+        blob = bucket.blob(f"pending_cv_uploads/{safe_filename}")
         blob.upload_from_string(file_bytes, content_type=file.content_type)
         print(f"✅ Archivo subido a GCS: {blob.public_url}")
 

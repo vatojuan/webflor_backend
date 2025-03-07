@@ -14,6 +14,7 @@ from openai import OpenAI
 from app.email_utils import send_credentials_email  # Asegúrate de que esté en app/email_utils.py
 from pgvector.psycopg2 import register_vector  # Asegúrate de tener instalado pgvector
 import bcrypt
+import urllib.parse  # Para decodificar URLs
 
 load_dotenv()
 
@@ -88,6 +89,14 @@ def extract_name(text):
         return None
     return name_from_cv
 
+def sanitize_filename(filename: str) -> str:
+    """Reemplaza espacios por guiones bajos y elimina caracteres problemáticos."""
+    # Reemplaza espacios por guiones bajos
+    filename = filename.replace(" ", "_")
+    # Opcional: eliminar otros caracteres no deseados (deja letras, números, guiones, guiones bajos y puntos)
+    filename = re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
+    return filename
+
 @router.get("/confirm")
 async def confirm_email(code: str = Query(...)):
     conn = None
@@ -108,9 +117,20 @@ async def confirm_email(code: str = Query(...)):
         user_email = user_email.lower()
         print(f"✅ Registro encontrado para {user_email} con CV URL: {cv_url}")
 
-        # Mover el archivo de "pending_cv_uploads" a "employee-documents"
-        old_path = cv_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
+        # Decodificar la URL para convertir %20 a espacios
+        decoded_url = urllib.parse.unquote(cv_url)
+        print(f"🔎 URL decodificada: {decoded_url}")
+
+        # Extraer el path (la parte que sigue a la URL base)
+        old_path = decoded_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
+        # Aplicar la misma sanitización usada en la subida para asegurar consistencia
+        old_path = sanitize_filename(old_path)
+        print(f"🔎 Path del archivo obtenido: {old_path}")
+
+        # Generar el nuevo path reemplazando la carpeta
         new_path = old_path.replace("pending_cv_uploads", "employee-documents")
+        print(f"🔎 Nuevo path: {new_path}")
+
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(old_path)
         new_blob = bucket.rename_blob(blob, new_path)
@@ -166,7 +186,7 @@ async def confirm_email(code: str = Query(...)):
         conn.commit()
         print("✅ Embedding del CV almacenado en FileEmbedding")
 
-        # Generar embedding de la descripción (sin casteo, pues la columna en "User" es double precision[])
+        # Generar embedding de la descripción
         embedding_response_desc = client.embeddings.create(
             model="text-embedding-ada-002",
             input=description
@@ -178,8 +198,7 @@ async def confirm_email(code: str = Query(...)):
         plain_password, hashed_password = generate_secure_password()
         print("✅ Contraseña segura generada y hasheada")
 
-        # Insertar o actualizar el usuario en la tabla "User" y obtener su id,
-        # almacenando el embedding de la descripción en la columna embedding
+        # Insertar o actualizar el usuario en la tabla "User"
         cur.execute(
             'INSERT INTO "User" (email, name, role, description, phone, password, confirmed, "cvUrl", embedding) VALUES (%s, %s, %s, %s, %s, %s, TRUE, %s, %s) '
             'ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description, phone = EXCLUDED.phone, '
