@@ -165,13 +165,18 @@ async def confirm_email(code: str = Query(...)):
         # Generar descripción automática con OpenAI
         description_prompt = [
             {"role": "system", "content": "Eres un experto en recursos humanos."},
-            {"role": "user", "content": f"Genera una breve descripción profesional para el siguiente CV:\n\n{text_content[:500]}"}
+            {
+                "role": "user",
+                "content": f"Genera una descripción profesional para el siguiente CV:\n\n{text_content[:3000]}"
+            }
         ]
         description_response = client.chat.completions.create(
             model="gpt-4-turbo",
             messages=description_prompt,
-            max_tokens=50
+            max_tokens=200,      # Aumenta si deseas más largo
+            temperature=0.7      # Un poco más de creatividad
         )
+
         description = description_response.choices[0].message.content.strip()
         print(f"✅ Descripción generada: {description}")
 
