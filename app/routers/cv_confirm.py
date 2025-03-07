@@ -90,10 +90,10 @@ def extract_name(text):
     return name_from_cv
 
 def sanitize_filename(filename: str) -> str:
-    """Reemplaza espacios por guiones bajos y elimina caracteres problemáticos."""
-    # Reemplaza espacios por guiones bajos
+    """Reemplaza espacios por guiones bajos y elimina caracteres problemáticos.
+    Nota: Esta función está pensada para sanitizar nombres de archivo, no rutas completas.
+    """
     filename = filename.replace(" ", "_")
-    # Opcional: eliminar otros caracteres no deseados (deja letras, números, guiones, guiones bajos y puntos)
     filename = re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
     return filename
 
@@ -121,10 +121,16 @@ async def confirm_email(code: str = Query(...)):
         decoded_url = urllib.parse.unquote(cv_url)
         print(f"🔎 URL decodificada: {decoded_url}")
 
-        # Extraer el path (la parte que sigue a la URL base)
-        old_path = decoded_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
-        # Aplicar la misma sanitización usada en la subida para asegurar consistencia
-        old_path = sanitize_filename(old_path)
+        # Extraer el path del objeto (la parte luego de la URL base)
+        old_path_full = decoded_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
+        # Dividir en carpeta y nombre del archivo para sanitizar solo el nombre
+        parts = old_path_full.split("/", 1)
+        if len(parts) == 2:
+            folder, filename = parts
+            filename = sanitize_filename(filename)
+            old_path = f"{folder}/{filename}"
+        else:
+            old_path = sanitize_filename(old_path_full)
         print(f"🔎 Path del archivo obtenido: {old_path}")
 
         # Generar el nuevo path reemplazando la carpeta
@@ -147,7 +153,7 @@ async def confirm_email(code: str = Query(...)):
         print(f"✅ Texto del CV obtenido (total de {len(text_content)} caracteres)")
         print(f"🔎 Fragmento inicial del texto:\n{text_content[:500]}")
 
-        # Extraer datos: teléfono y extraer el nombre usando OpenAI
+        # Extraer datos: teléfono y el nombre usando OpenAI
         phone_number = extract_phone(text_content)
         print(f"✅ Teléfono extraído: {phone_number}")
         name_from_cv = extract_name(text_content)
