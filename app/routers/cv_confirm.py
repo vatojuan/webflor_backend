@@ -165,20 +165,35 @@ async def confirm_email(code: str = Query(...)):
         # Generar descripción automática con OpenAI
         description_prompt = [
             {"role": "system", "content": "Eres un experto en recursos humanos."},
-            {
-                "role": "user",
-                "content": f"Genera una descripción profesional para el siguiente CV:\n\n{text_content[:3000]}"
-            }
+            {"role": "user", "content": f"Genera una descripción profesional para el siguiente CV:\n\n{text_content[:2000]}"}
         ]
+
         description_response = client.chat.completions.create(
             model="gpt-4-turbo",
             messages=description_prompt,
-            max_tokens=200,      # Aumenta si deseas más largo
-            temperature=0.7      # Un poco más de creatividad
+            max_tokens=300,
+            temperature=0.7
         )
 
         description = description_response.choices[0].message.content.strip()
+
+        # Si la descripción parece cortada, pedimos a OpenAI que continúe
+        if len(description) >= 280:  # Umbral de corte (ajústalo según necesidad)
+            follow_up_prompt = [
+                {"role": "system", "content": "Eres un experto en recursos humanos."},
+                {"role": "user", "content": f"Continúa la descripción anterior con más detalles."}
+            ]
+
+            follow_up_response = client.chat.completions.create(
+                model="gpt-4-turbo",
+                messages=follow_up_prompt,
+                max_tokens=200  # Permitimos más tokens para completar
+            )
+
+            description += " " + follow_up_response.choices[0].message.content.strip()
+
         print(f"✅ Descripción generada: {description}")
+
 
         # Generar embedding del CV completo
         embedding_response = client.embeddings.create(
