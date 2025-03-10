@@ -14,10 +14,10 @@ router = APIRouter()
 
 # Usuario administrador ficticio (puedes integrarlo con tu base de datos)
 fake_admin_db = {
-    "admin@example.com": {
+    "support@fapmendoza.com": {
         "username": "support@fapmendoza.com",
-        # Contraseña "admin123" hasheada con bcrypt
-        "hashed_password": "$2b$12$ZfxF67jn5I6E/dL/9WWRWe5S8QHRlFX0PrX5jOb9BLKjl3S6EIl5S",
+        # Contraseña "F4pm3nd024!!" hasheada con bcrypt
+        "hashed_password": "$2b$12$hsu3vKp7yG3TP.GfTFSvQeTSlIykZjZtVhRcn5ugNJ7te0x3iO8S2",
         "role": "admin"
     }
 }
