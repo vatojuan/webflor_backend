@@ -5,14 +5,14 @@ from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-# Configuración del JWT (cambia la SECRET_KEY por una segura y guárdala de forma adecuada)
+# Configuración del JWT
 SECRET_KEY = "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12"  
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 router = APIRouter()
 
-# Usuario administrador ficticio (puedes integrarlo con tu base de datos)
+# Usuario administrador ficticio
 fake_admin_db = {
     "support@fapmendoza.com": {
         "username": "support@fapmendoza.com",
@@ -34,7 +34,8 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-@router.post("/auth/admin-login")
+# Definir la ruta sin el prefijo "/auth"
+@router.post("/admin-login")
 async def admin_login(form_data: OAuth2PasswordRequestForm = Depends()):
     user = fake_admin_db.get(form_data.username)
     if not user:
