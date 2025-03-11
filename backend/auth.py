@@ -5,14 +5,12 @@ from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-# Configuración del JWT
-SECRET_KEY = "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12"  
+SECRET_KEY = "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 router = APIRouter()
 
-# Usuario administrador ficticio
 fake_admin_db = {
     "support@fapmendoza.com": {
         "username": "support@fapmendoza.com",
@@ -34,15 +32,14 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# Definir la ruta sin el prefijo "/auth"
-@router.post("/admin-login")
+@router.post("/admin-login", tags=["auth"])
 async def admin_login(form_data: OAuth2PasswordRequestForm = Depends()):
     user = fake_admin_db.get(form_data.username)
     if not user:
         raise HTTPException(status_code=400, detail="Usuario o contraseña incorrectos")
     if not verify_password(form_data.password, user["hashed_password"]):
         raise HTTPException(status_code=400, detail="Usuario o contraseña incorrectos")
-    
+
     access_token = create_access_token(
         data={"sub": user["username"], "role": user["role"]},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
