@@ -17,7 +17,7 @@ fake_admin_db = {
     "support@fapmendoza.com": {
         "username": "support@fapmendoza.com",
         # Contraseña "F4pm3nd024!!" hasheada con bcrypt
-        "hashed_password": "$2b$12$hsu3vKp7yG3TP.GfTFSvQeTSlIykZjZtVhRcn5ugNJ7te0x3iO8S2",
+        "hashed_password": "$2b$12$vMNxLtLlYAFpI4ZubU9ave/GPzEdMnTWDObyzLTYNhqgplD.nK/Yi",
         "role": "admin"
     }
 }
