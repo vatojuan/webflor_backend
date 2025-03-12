@@ -1,14 +1,20 @@
-# backend/main.py
 from fastapi import FastAPI
-from auth import router as auth_router  # Importamos el router correctamente
+from backend.auth import router as auth_router
 
 app = FastAPI()
 
-# Incluir el router con el prefijo "/auth"
-app.include_router(auth_router, prefix="/auth", tags=["auth"])
+# Registrar el router de administración con prefijo "/auth"
+app.include_router(auth_router, prefix="/auth", tags=["admin"])
 
-# Verificación rápida: Mostrar en logs si las rutas se cargaron
+# (Opcional) Aquí podrías incluir otros endpoints o lógica propia de la API administrativa
+
+# Evento de arranque: listar las rutas cargadas (para depuración)
 @app.on_event("startup")
-async def startup_event():
+def list_routes():
     for route in app.routes:
         print(f"✅ Ruta cargada: {route.path}")
+
+# Si deseas agregar alguna ruta de prueba, por ejemplo:
+@app.get("/admin/protected", tags=["admin"])
+def admin_protected():
+    return {"message": "Ruta protegida para administradores"}
