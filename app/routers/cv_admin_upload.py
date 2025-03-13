@@ -77,7 +77,8 @@ def sanitize_filename(filename: str) -> str:
     filename = filename.replace(" ", "_")
     return re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
 
-router = APIRouter(prefix="/cv", tags=["cv_admin"])
+# Aquí ya NO usamos prefix="/cv"
+router = APIRouter(tags=["cv_admin"])
 
 @router.post("/admin_upload")
 async def admin_upload_cv(files: list[UploadFile] = File(...)):

@@ -72,10 +72,10 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
 def admin_protected(current_admin: str = Depends(get_current_admin)):
     return {"message": f"Ruta protegida para administradores, bienvenido {current_admin}"}
 
-# Registrar el router de carga masiva de CVs (protegido)
+# Registrar el router de carga masiva de CVs sin agregar prefix adicional
+# Se utiliza la dependencia para asegurar que solo administradores autenticados accedan
 app.include_router(
     cv_admin_upload.router,
-    prefix="/cv",
     tags=["cv_admin"],
     dependencies=[Depends(get_current_admin)]
 )
