@@ -13,7 +13,7 @@ from app.routers import (
 # Importar router administrativo (login admin) desde backend
 from backend.auth import router as admin_router
 
-# Importar el nuevo router para carga masiva de CVs (administración)
+# Importar el nuevo router para carga masiva de CVs
 from app.routers import cv_admin_upload
 
 # Configuración de JWT (debe coincidir con la usada en backend/auth.py)
@@ -45,10 +45,10 @@ app.include_router(integration.router)
 app.include_router(users.router)
 app.include_router(webhooks.router)
 
-# Registrar el router administrativo con prefijo "/auth" (para el login admin)
+# Registrar el router administrativo para login
 app.include_router(admin_router, prefix="/auth", tags=["admin"])
 
-# Configurar el esquema de OAuth2 para la protección de endpoints de administrador
+# Configurar OAuth2 para endpoints protegidos
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
 def get_current_admin(token: str = Depends(oauth2_scheme)):
@@ -67,17 +67,15 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
         )
     return username
 
-# Agregar el endpoint protegido de administración (ejemplo)
+# Ejemplo de endpoint protegido
 @app.get("/admin/protected", tags=["admin"])
 def admin_protected(current_admin: str = Depends(get_current_admin)):
     return {"message": f"Ruta protegida para administradores, bienvenido {current_admin}"}
 
-# Registrar el nuevo router para carga masiva de CVs
-# Aquí se protege el endpoint añadiendo la dependencia get_current_admin,
-# de modo que solo administradores autenticados puedan acceder.
+# Registrar el router de carga masiva de CVs (protegido)
 app.include_router(
     cv_admin_upload.router,
-    prefix="/cv", 
+    prefix="/cv",
     tags=["cv_admin"],
     dependencies=[Depends(get_current_admin)]
 )
