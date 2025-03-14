@@ -41,7 +41,6 @@ app.include_router(cv_processing.router)
 app.include_router(files.router)
 app.include_router(file_processing.router)
 app.include_router(integration.router)
-# app.include_router(token_utils.router)  # Descomenta si es necesario
 app.include_router(users.router)
 app.include_router(webhooks.router)
 
@@ -52,6 +51,11 @@ app.include_router(admin_router, prefix="/auth", tags=["admin"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
 def get_current_admin(token: str = Depends(oauth2_scheme)):
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no proporcionado"
+        )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
@@ -67,17 +71,16 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
         )
     return username
 
-# Ejemplo de endpoint protegido
-@app.get("/admin/protected", tags=["admin"])
-def admin_protected(current_admin: str = Depends(get_current_admin)):
-    return {"message": f"Ruta protegida para administradores, bienvenido {current_admin}"}
-
 # Registrar el router de carga masiva de CVs (ruta: /admin_upload)
 app.include_router(
     cv_admin_upload.router,
     tags=["cv_admin"],
     dependencies=[Depends(get_current_admin)]
 )
+
+@app.get("/admin/protected", tags=["admin"])
+def admin_protected(current_admin: str = Depends(get_current_admin)):
+    return {"message": f"Ruta protegida para administradores, bienvenido {current_admin}"}
 
 @app.get("/")
 def home():
