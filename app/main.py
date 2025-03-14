@@ -6,14 +6,14 @@ from jose import JWTError, jwt
 # Importar routers públicos (clientes)
 from app.routers import (
     auth as public_auth,
-    cv_confirm, cv_upload, cv_processing, files, 
+    cv_confirm, cv_upload, cv_processing, files,
     file_processing, integration, token_utils, users, webhooks
 )
 
 # Importar router administrativo (login admin) desde backend
 from backend.auth import router as admin_router
 
-# Importar el nuevo router para carga masiva de CVs
+# Importar el router de carga masiva de CVs
 from app.routers import cv_admin_upload
 
 # Configuración de JWT (debe coincidir con la usada en backend/auth.py)
@@ -72,8 +72,7 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
 def admin_protected(current_admin: str = Depends(get_current_admin)):
     return {"message": f"Ruta protegida para administradores, bienvenido {current_admin}"}
 
-# Registrar el router de carga masiva de CVs sin agregar prefix adicional
-# Se utiliza la dependencia para asegurar que solo administradores autenticados accedan
+# Registrar el router de carga masiva de CVs
 app.include_router(
     cv_admin_upload.router,
     tags=["cv_admin"],

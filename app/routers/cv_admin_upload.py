@@ -77,7 +77,7 @@ def sanitize_filename(filename: str) -> str:
     filename = filename.replace(" ", "_")
     return re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
 
-# Aquí ya NO usamos prefix="/cv"
+# Se crea el router sin prefijo adicional.
 router = APIRouter(tags=["cv_admin"])
 
 @router.post("/admin_upload")
@@ -92,7 +92,7 @@ async def admin_upload_cv(files: list[UploadFile] = File(...)):
             safe_filename = sanitize_filename(file.filename)
             logs.append(f"Nombre sanitizado: {safe_filename}")
             
-            # Subir el archivo directamente a "employee-documents"
+            # Subir el archivo a "employee-documents"
             blob_path = f"employee-documents/{safe_filename}"
             bucket = storage_client.bucket(BUCKET_NAME)
             blob = bucket.blob(blob_path)
