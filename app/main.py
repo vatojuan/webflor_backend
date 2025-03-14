@@ -16,6 +16,9 @@ from backend.auth import router as admin_router
 # Importar el router de carga masiva de CVs
 from app.routers import cv_admin_upload
 
+# Importar el router de ofertas de empleo
+from app.routers import job as job_router
+
 # Configuración de JWT (debe coincidir con la usada en backend/auth.py)
 SECRET_KEY = "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12"
 ALGORITHM = "HS256"
@@ -76,6 +79,13 @@ app.include_router(
     cv_admin_upload.router,
     tags=["cv_admin"],
     dependencies=[Depends(get_current_admin)]
+)
+
+# Registrar el router de ofertas de empleo
+app.include_router(
+    job_router.router,
+    prefix="/api/job",
+    tags=["job"]
 )
 
 @app.get("/admin/protected", tags=["admin"])
