@@ -55,7 +55,7 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
-        if username != "support@fapmendoza.com":
+        if not username:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token inválido o sesión expirada"
@@ -72,7 +72,7 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
 def admin_protected(current_admin: str = Depends(get_current_admin)):
     return {"message": f"Ruta protegida para administradores, bienvenido {current_admin}"}
 
-# Registrar el router de carga masiva de CVs
+# Registrar el router de carga masiva de CVs (ruta: /admin_upload)
 app.include_router(
     cv_admin_upload.router,
     tags=["cv_admin"],

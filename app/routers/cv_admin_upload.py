@@ -135,7 +135,7 @@ async def admin_upload_cv(files: list[UploadFile] = File(...)):
             )
             description = description_response.choices[0].message.content.strip()
             logs.append("Descripción generada")
-            if len(description) >= 280:
+            if (description and len(description)) >= 280:
                 follow_up_prompt = [
                     {"role": "system", "content": "Eres un experto en recursos humanos."},
                     {"role": "user", "content": "Continúa la descripción anterior con más detalles."}
