@@ -21,7 +21,7 @@ def get_db_connection():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en la conexión a la base de datos: {e}")
 
-@router.post("/job/create-admin")
+@router.post("/create-admin")  # Ajuste aquí: sin duplicar "job"
 async def create_admin_job(request: Request):
     data = await request.json()
     title = data.get("title")
