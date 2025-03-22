@@ -62,7 +62,7 @@ def extract_text_from_pdf(pdf_bytes):
 
 def extract_email(text):
     """Extrae el primer email encontrado en el texto."""
-    emails = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)
+    emails = re.findall(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b", text)
     return emails[0] if emails else None
 
 def extract_phone(text):
