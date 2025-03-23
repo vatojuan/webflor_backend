@@ -48,11 +48,10 @@ def extract_text_from_pdf(pdf_bytes):
 
 def extract_email(text):
     """Limpia el texto y extrae solo el primer email válido."""
-    # Limpiar el texto de saltos de línea raros
+    # Limpiar el texto de saltos de línea y espacios extra
     cleaned_text = re.sub(r'[\n\r\t]', ' ', text)
-    cleaned_text = re.sub(r'\s{2,}', ' ', cleaned_text)  # Reemplazar espacios múltiples
-
-    # Buscar email exacto con límites
+    cleaned_text = re.sub(r'\s{2,}', ' ', cleaned_text)
+    # Buscar email exacto usando límites de palabra
     emails = re.findall(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', cleaned_text)
     return emails[0] if emails else None
 
