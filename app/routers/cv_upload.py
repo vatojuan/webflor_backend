@@ -47,20 +47,30 @@ def extract_text_from_pdf(pdf_bytes):
 
 def extract_email(text):
     """
-    Limpia el texto y usa una regex con lookahead para NO capturar si el dominio
-    (.com, .org, etc.) viene pegado a una palabra (sin espacio/puntuación).
+    Limpia el texto y busca un email en dos pasadas:
+    1) Regex formal (con lookahead).
+    2) Si no hay match, forzamos un espacio tras el TLD pegado a la siguiente palabra.
     """
-    # 1) Limpiar saltos y espacios extras
+    # Limpieza inicial
     cleaned_text = re.sub(r'[\n\r\t]+', ' ', text)
     cleaned_text = re.sub(r'\s{2,}', ' ', cleaned_text)
 
-    # 2) Regex de email con lookahead:
-    #    - Coincide:  username@dominio.TLD (TLD de 2 a 8 letras)
-    #    - SOLO si después hay un boundary (\b) o un NO-alfabético ([^a-zA-Z])
+    # Regex con lookahead
     pattern = r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,8}(?=\b|[^a-zA-Z])'
-    emails = re.findall(pattern, cleaned_text)
 
-    return emails[0] if emails else None
+    # PASADA 1
+    emails = re.findall(pattern, cleaned_text)
+    if emails:
+        return emails[0]
+
+    # PASADA 2: Forzamos espacio si el TLD se junta con una letra
+    forced_text = re.sub(r'(\.[a-zA-Z]{2,8})([A-Za-z])', r'\1 \2', cleaned_text)
+    emails2 = re.findall(pattern, forced_text)
+    if emails2:
+        return emails2[0]
+
+    # Nada encontrado
+    return None
 
 def sanitize_filename(filename: str) -> str:
     filename = filename.replace(" ", "_")
@@ -68,11 +78,7 @@ def sanitize_filename(filename: str) -> str:
     return filename
 
 @router.post("/upload")
-async def upload_cv(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    email: str = Form(None)
-):
+async def upload_cv(background_tasks: BackgroundTasks, file: UploadFile = File(...), email: str = Form(None)):
     try:
         file_bytes = await file.read()
         print(f"✅ Archivo recibido: {file.filename}, tamaño: {len(file_bytes)} bytes")
@@ -91,7 +97,6 @@ async def upload_cv(
         print(f"✅ Texto extraído correctamente. Total de caracteres: {len(text_content)}")
         print(f"🔎 Fragmento inicial del texto:\n{text_content[:500]}")
 
-        # 3) Extraer email del CV o usar el que venga en el form
         extracted_email = extract_email(text_content)
         user_email = email or extracted_email
         if not user_email:
@@ -104,7 +109,7 @@ async def upload_cv(
         confirmation_code = str(uuid.uuid4())
         print(f"✅ Código de confirmación generado: {confirmation_code}")
 
-        # 4) Insertar en pending_users
+        # Insertar en pending_users
         try:
             conn = get_db_connection()
             cur = conn.cursor()
@@ -112,9 +117,8 @@ async def upload_cv(
                 """
                 INSERT INTO pending_users (id, email, confirmation_code, cv_url)
                 VALUES (gen_random_uuid(), %s, %s, %s)
-                ON CONFLICT (email) DO UPDATE
-                SET confirmation_code = EXCLUDED.confirmation_code,
-                    cv_url = EXCLUDED.cv_url
+                ON CONFLICT (email)
+                DO UPDATE SET confirmation_code = EXCLUDED.confirmation_code, cv_url = EXCLUDED.cv_url
                 """,
                 (user_email, confirmation_code, blob.public_url)
             )
@@ -124,12 +128,9 @@ async def upload_cv(
             print("✅ Registro pendiente insertado/actualizado en la base de datos")
         except Exception as db_err:
             print(f"❌ Error insertando en la base de datos: {db_err}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error insertando en la base de datos: {db_err}"
-            )
+            raise HTTPException(status_code=500, detail=f"Error insertando en la base de datos: {db_err}")
 
-        # 5) Enviar email de confirmación en background
+        # Enviar email de confirmación
         background_tasks.add_task(send_confirmation_email, user_email, confirmation_code)
 
         return {
