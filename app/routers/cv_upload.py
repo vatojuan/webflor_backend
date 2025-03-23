@@ -47,8 +47,13 @@ def extract_text_from_pdf(pdf_bytes):
         raise Exception(f"Error extrayendo texto del PDF: {e}")
 
 def extract_email(text):
-    """Extrae el primer email encontrado en el texto utilizando límites de palabra para evitar capturar texto extra."""
-    emails = re.findall(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b", text)
+    """Limpia el texto y extrae solo el primer email válido."""
+    # Limpiar el texto de saltos de línea raros
+    cleaned_text = re.sub(r'[\n\r\t]', ' ', text)
+    cleaned_text = re.sub(r'\s{2,}', ' ', cleaned_text)  # Reemplazar espacios múltiples
+
+    # Buscar email exacto con límites
+    emails = re.findall(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', cleaned_text)
     return emails[0] if emails else None
 
 def sanitize_filename(filename: str) -> str:
