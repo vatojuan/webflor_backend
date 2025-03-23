@@ -47,15 +47,13 @@ def extract_text_from_pdf(pdf_bytes):
         raise Exception(f"Error extrayendo texto del PDF: {e}")
 
 def extract_email(text):
-    """Extrae el primer email encontrado en el texto."""
-    emails = re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}(?![a-zA-Z])", text)
+    """Extrae el primer email encontrado en el texto utilizando límites de palabra para evitar capturar texto extra."""
+    emails = re.findall(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b", text)
     return emails[0] if emails else None
 
 def sanitize_filename(filename: str) -> str:
     """Reemplaza espacios por guiones bajos y elimina caracteres problemáticos."""
-    # Reemplaza espacios por guiones bajos
     filename = filename.replace(" ", "_")
-    # Opcional: eliminar caracteres no permitidos (deja solo letras, números, guiones, guiones bajos y puntos)
     filename = re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
     return filename
 
@@ -118,7 +116,10 @@ async def upload_cv(background_tasks: BackgroundTasks, file: UploadFile = File(.
         # Encolar el envío de email de confirmación en background
         background_tasks.add_task(send_confirmation_email, user_email, confirmation_code)
 
-        return {"message": "Se ha enviado un email de confirmación.", "email": user_email}
+        return {
+            "message": f"Se ha enviado un email de confirmación a {user_email}. Te recomendamos revisar tu bandeja de correo no deseado o spam.",
+            "email": user_email
+        }
 
     except Exception as e:
         print(f"❌ Error procesando el CV: {e}")
