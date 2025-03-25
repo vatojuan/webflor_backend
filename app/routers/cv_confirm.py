@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 from google.cloud import storage
 from PyPDF2 import PdfReader
 from openai import OpenAI
-from app.email_utils import send_credentials_email  # Asegúrate de que esté en app/email_utils.py
-from pgvector.psycopg2 import register_vector  # Asegúrate de tener instalado pgvector
+from app.email_utils import send_credentials_email  # Asegurate de que esté en app/email_utils.py
+from pgvector.psycopg2 import register_vector  # Asegurate de tener instalado pgvector
 import bcrypt
 import urllib.parse  # Para decodificar URLs
 
@@ -59,11 +59,6 @@ def extract_text_from_pdf(pdf_bytes):
         return text.strip()
     except Exception as e:
         raise Exception(f"Error extrayendo texto del PDF: {e}")
-
-def extract_email(text):
-    """Extrae el primer email encontrado en el texto."""
-    emails = re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}(?![a-zA-Z])", text)
-    return emails[0] if emails else None
 
 def extract_phone(text):
     """Extrae un número de teléfono si se encuentra."""
@@ -178,22 +173,19 @@ async def confirm_email(code: str = Query(...)):
         description = description_response.choices[0].message.content.strip()
 
         # Si la descripción parece cortada, pedimos a OpenAI que continúe
-        if len(description) >= 280:  # Umbral de corte (ajústalo según necesidad)
+        if len(description) >= 280:
             follow_up_prompt = [
                 {"role": "system", "content": "Eres un experto en recursos humanos."},
-                {"role": "user", "content": f"Continúa la descripción anterior con más detalles."}
+                {"role": "user", "content": "Continúa la descripción anterior con más detalles."}
             ]
-
             follow_up_response = client.chat.completions.create(
                 model="gpt-4-turbo",
                 messages=follow_up_prompt,
-                max_tokens=200  # Permitimos más tokens para completar
+                max_tokens=200
             )
-
             description += " " + follow_up_response.choices[0].message.content.strip()
 
         print(f"✅ Descripción generada: {description}")
-
 
         # Generar embedding del CV completo
         embedding_response = client.embeddings.create(

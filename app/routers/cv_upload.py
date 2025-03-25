@@ -45,32 +45,57 @@ def extract_text_from_pdf(pdf_bytes):
     except Exception as e:
         raise Exception(f"Error extrayendo texto del PDF: {e}")
 
+# --- Versión corregida de extract_email() ---
+COMMON_TLDS = {"com", "org", "net", "edu", "gov", "io", "co", "us", "ar", "comar"}
+
 def extract_email(text):
     """
-    Limpia el texto y busca un email en dos pasadas:
-    1) Regex formal (con lookahead).
-    2) Si no hay match, forzamos un espacio tras el TLD pegado a la siguiente palabra.
+    Extrae el primer email del texto y recorta cualquier texto extra pegado al TLD,
+    usando una lista de TLDs comunes para determinar dónde cortar.
+    
+    Ejemplos:
+      "jonathanguarnier2017@gmail.comExperiencia laboral..."  => "jonathanguarnier2017@gmail.com"
+      "persona@example.orgExtra"                              => "persona@example.org"
+      "prueba@empresa.comarDoc adicional"                     => "prueba@empresa.comar"
     """
-    # Limpieza inicial
-    cleaned_text = re.sub(r'[\n\r\t]+', ' ', text)
+    # 1. Limpieza básica: reemplazar saltos de línea, retornos y tabulaciones por un espacio
+    cleaned_text = re.sub(r'[\r\n\t]+', ' ', text)
     cleaned_text = re.sub(r'\s{2,}', ' ', cleaned_text)
+    
+    # 2. Buscar un candidato a email (puede incluir letras extra pegadas al TLD)
+    pattern = r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}[A-Za-z]*'
+    match = re.search(pattern, cleaned_text)
+    if not match:
+        return None
+    candidate = match.group(0)
+    
+    # 3. Buscar el último punto para identificar el inicio del TLD
+    last_dot = candidate.rfind('.')
+    if last_dot == -1:
+        return candidate
 
-    # Regex con lookahead
-    pattern = r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,8}(?=\b|[^a-zA-Z])'
+    # 4. Extraer la secuencia de letras pegadas tras el punto
+    tld_contig = ""
+    for ch in candidate[last_dot+1:]:
+        if ch.isalpha():
+            tld_contig += ch
+        else:
+            break
 
-    # PASADA 1
-    emails = re.findall(pattern, cleaned_text)
-    if emails:
-        return emails[0]
+    # 5. Iterar de mayor a menor (de hasta 8 letras) para determinar el TLD válido
+    max_length = min(9, len(tld_contig)+1)  # probar hasta 8 letras
+    valid_tld = None
+    for i in range(max_length-1, 1, -1):
+        possible_tld = tld_contig[:i].lower()
+        if possible_tld in COMMON_TLDS:
+            valid_tld = possible_tld
+            break
 
-    # PASADA 2: Forzamos espacio si el TLD se junta con una letra
-    forced_text = re.sub(r'(\.[a-zA-Z]{2,8})([A-Za-z])', r'\1 \2', cleaned_text)
-    emails2 = re.findall(pattern, forced_text)
-    if emails2:
-        return emails2[0]
-
-    # Nada encontrado
-    return None
+    if valid_tld:
+        final_email = candidate[:last_dot+1+len(valid_tld)]
+        return final_email
+    else:
+        return candidate
 
 def sanitize_filename(filename: str) -> str:
     filename = filename.replace(" ", "_")
