@@ -53,7 +53,7 @@ async def create_admin_job(request: Request):
         conn = get_db_connection()
         cur = conn.cursor()
         query = """
-            INSERT INTO jobs (title, description, requirements, "expirationDate", "userId")
+            INSERT INTO "Job" (title, description, requirements, "expirationDate", "userId")
             VALUES (%s, %s, %s, %s, %s) RETURNING id;
         """
         values = (title, description, requirements, exp_date, userId_int)
