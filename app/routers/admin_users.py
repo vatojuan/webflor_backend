@@ -66,7 +66,7 @@ def list_users(current_admin: str = Depends(get_current_admin)):
 @router.put("/{user_id}")
 def update_user(user_id: str, data: dict, current_admin: str = Depends(get_current_admin)):
     """
-    Actualiza el nombre, teléfono y descripción del usuario.
+    Actualiza el nombre, teléfono y descripción del usuario y regenera el embedding de la descripción.
     Se espera que data incluya: { "name": "...", "phone": "...", "description": "..." }
     """
     try:
@@ -82,8 +82,12 @@ def update_user(user_id: str, data: dict, current_admin: str = Depends(get_curre
         conn.commit()
         cur.close()
         conn.close()
-        # (Opcional) Podés llamar a update_user_embedding(user_id) si querés actualizar el embedding del usuario
-        return {"message": "Usuario actualizado"}
+
+        # Regenerar el embedding a partir de la nueva descripción
+        from app.services.embedding import update_user_embedding
+        update_user_embedding(user_id)
+
+        return {"message": "Usuario actualizado y embedding de descripción modificado"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
