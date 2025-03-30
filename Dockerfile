@@ -1,34 +1,39 @@
+# Etapa 1: builder
 FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Instalar dependencias del sistema necesarias
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential
+# Instalar dependencias del sistema necesarias para compilar paquetes
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
 
 # Copiar los requerimientos e instalar dependencias
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-# Descargar modelo de Hugging Face antes del despliegue
+# Descargar modelo de Hugging Face en etapa build
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
-# Etapa final: copiar las dependencias al contenedor final
+# Etapa 2: final
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copiar las dependencias desde la etapa builder
+# Copiar todo desde el builder
 COPY --from=builder /app /app
 
-# Copiar el resto de la aplicación
+# Copiar el resto de la app por si hay archivos que no se incluyeron antes (opcional, ya están en builder)
 COPY . /app
 
-# Asegurar que los paquetes están en el PATH
-ENV PATH="/app/.local/bin:$PATH"
-
-# Configurar variables de caché y puerto
+# Establecer variable de entorno para el cache de HF y path
 ENV HF_HOME=/app/hf_cache
+ENV PATH="/app/.local/bin:$PATH"
 ENV PORT=10000
 
-# Comando de inicio, asegurando que Python lo reconozca correctamente
+# Exponer el puerto que Render usará
+EXPOSE 10000
+
+# Comando de inicio para FastAPI
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "10000"]

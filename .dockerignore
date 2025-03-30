@@ -1,0 +1,41 @@
+# Carpetas de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Entornos virtuales
+venv/
+env/
+.venv/
+
+# Archivos sensibles
+.env
+.env.*
+*.secret
+*.key
+*.pem
+
+# Archivos y carpetas de Git
+.git/
+.gitignore
+
+# Logs y caché
+*.log
+*.sqlite3
+*.db
+*.bak
+*.swp
+*.swo
+
+# Archivos temporales de editores
+*.DS_Store
+*.vscode/
+*.idea/
+*.mypy_cache/
+*.pytest_cache/
+
+# Node.js por si tenés frontend junto
+node_modules/
+dist/
+build/
