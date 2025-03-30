@@ -20,7 +20,7 @@ from app.routers import cv_admin_upload
 from app.routers import job as job_router
 
 # Importar el router para la gestión de usuarios (nuevos endpoints)
-from app.utils.auth_utils import get_current_admin
+from app.routers import admin_users
 
 # Configuración de JWT (debe coincidir con la usada en backend/auth.py)
 SECRET_KEY = "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12"
