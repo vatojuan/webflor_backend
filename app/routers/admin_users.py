@@ -7,7 +7,7 @@ from fastapi.security import OAuth2PasswordBearer
 from dotenv import load_dotenv
 from google.cloud import storage
 
-from main import get_current_admin  # Asegurate de que la función get_current_admin esté definida en main.py
+from app.utils.auth_utils import get_current_admin  # Asegurate de que la función get_current_admin esté definida en main.py
 
 load_dotenv()
 
