@@ -74,6 +74,12 @@ async def update_admin_offer(request: Request):
     if not job_id or not title or not description or not userId:
         raise HTTPException(status_code=400, detail="Faltan campos obligatorios")
 
+    # Convertir job_id a entero
+    try:
+        job_id_int = int(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error en la conversión de job_id: {e}")
+
     # Convertir userId a entero
     try:
         userId_int = int(userId)
@@ -120,7 +126,7 @@ async def update_admin_offer(request: Request):
             exp_date,
             userId_int,
             embedding,
-            job_id
+            job_id_int
         ))
         updated_row = cur.fetchone()
         if not updated_row:
