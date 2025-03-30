@@ -52,6 +52,8 @@ async def get_admin_offers():
         conn.close()
         return {"offers": offers}
     except Exception as e:
+        # Aquí logueamos el error para revisarlo
+        print(f"Error al obtener ofertas: {e}")
         raise HTTPException(status_code=500, detail=f"Error al obtener las ofertas: {e}")
 
 @router.put("/update-admin")
