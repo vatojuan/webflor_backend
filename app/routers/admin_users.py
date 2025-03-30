@@ -1,37 +1,36 @@
-# backend/routers/admin_users.py
+# app/routers/admin_users.py
 import os
 import json
 import psycopg2
+import re
+import io
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from fastapi.security import OAuth2PasswordBearer
 from dotenv import load_dotenv
 from google.cloud import storage
-
-from app.utils.auth_utils import get_current_admin  # Asegurate de que la función get_current_admin esté definida en main.py
+from PyPDF2 import PdfReader
+from app.utils.auth_utils import get_current_admin
+from app.services.embedding import generate_file_embedding, get_db_connection  # Usamos el get_db_connection de embedding.py
 
 load_dotenv()
 
 router = APIRouter(prefix="/admin/users", tags=["admin_users"])
 
-# Función para obtener conexión a la BD (utilizada en otros endpoints también)
-def get_db_connection():
-    try:
-        conn = psycopg2.connect(
-            dbname=os.getenv("DBNAME", "postgres"),
-            user=os.getenv("USER"),
-            password=os.getenv("PASSWORD"),
-            host=os.getenv("HOST"),
-            port=5432,
-            sslmode="require"
-        )
-        return conn
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en la conexión a la base de datos: {e}")
-
 # Configurar Google Cloud Storage
 service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
 storage_client = storage.Client.from_service_account_info(service_account_info)
 BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
+
+def sanitize_filename(filename: str) -> str:
+    filename = filename.replace(" ", "_")
+    return re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
+
+def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        text = " ".join([page.extract_text() or "" for page in reader.pages])
+        return text.strip()
+    except Exception as e:
+        raise Exception(f"Error extrayendo texto del PDF: {e}")
 
 @router.get("")
 def list_users(current_admin: str = Depends(get_current_admin)):
@@ -53,7 +52,6 @@ def list_users(current_admin: str = Depends(get_current_admin)):
                 "description": u[4],
                 "files": []
             }
-            # Consultar archivos asociados al usuario en EmployeeDocument
             cur.execute('SELECT id, url, "originalName" FROM "EmployeeDocument" WHERE "userId" = %s', (u[0],))
             files = cur.fetchall()
             files_list = [{"id": f[0], "url": f[1], "filename": f[2]} for f in files]
@@ -84,6 +82,7 @@ def update_user(user_id: str, data: dict, current_admin: str = Depends(get_curre
         conn.commit()
         cur.close()
         conn.close()
+        # (Opcional) Podés llamar a update_user_embedding(user_id) si querés actualizar el embedding del usuario
         return {"message": "Usuario actualizado"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -99,19 +98,15 @@ def delete_user(user_id: str, current_admin: str = Depends(get_current_admin)):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Obtener los archivos asociados al usuario
         cur.execute('SELECT "fileKey", url FROM "EmployeeDocument" WHERE "userId" = %s', (user_id,))
         files = cur.fetchall()
         bucket = storage_client.bucket(BUCKET_NAME)
         for f in files:
             file_key = f[0]
             blob = bucket.blob(file_key)
-            blob.delete()  # Elimina el archivo de Google Cloud Storage
-        # Eliminar registros en EmployeeDocument
+            blob.delete()
         cur.execute('DELETE FROM "EmployeeDocument" WHERE "userId" = %s', (user_id,))
-        # Eliminar embeddings asociados (tabla file_embeddings)
         cur.execute('DELETE FROM file_embeddings WHERE user_id = %s', (user_id,))
-        # Eliminar el usuario
         cur.execute('DELETE FROM "User" WHERE id = %s', (user_id,))
         conn.commit()
         cur.close()
@@ -123,18 +118,23 @@ def delete_user(user_id: str, current_admin: str = Depends(get_current_admin)):
 @router.post("/{user_id}/files")
 def upload_user_file(user_id: str, file: UploadFile = File(...), current_admin: str = Depends(get_current_admin)):
     """
-    Sube un archivo para el usuario y lo registra en EmployeeDocument.
+    Sube un archivo para el usuario, extrae el texto y genera el embedding del contenido,
+    registrándolo en la tabla "FileEmbedding". Además, registra el archivo en "EmployeeDocument".
     """
     try:
         file_bytes = file.file.read()
-        safe_filename = file.filename.replace(" ", "_")
-        # Definir la ruta del archivo en GCS
+        safe_filename = sanitize_filename(file.filename)
         file_key = f"user-files/{user_id}/{safe_filename}"
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(file_key)
         blob.upload_from_string(file_bytes, content_type=file.content_type)
         file_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{file_key}"
-        # Registrar el archivo en la base de datos
+        # Extraer texto del archivo (se asume PDF)
+        text_content = extract_text_from_pdf(file_bytes)
+        if not text_content:
+            raise HTTPException(status_code=400, detail="No se pudo extraer texto del archivo para generar embedding")
+        # Generar embedding del contenido usando la función del servicio
+        embedding_file = generate_file_embedding(text_content)
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
@@ -143,13 +143,18 @@ def upload_user_file(user_id: str, file: UploadFile = File(...), current_admin: 
         )
         file_id = cur.fetchone()[0]
         conn.commit()
-        # Obtener archivos actualizados del usuario
+        cur.execute(
+            'INSERT INTO "FileEmbedding" ("fileKey", embedding, "createdAt") VALUES (%s, %s::vector, NOW()) '
+            'ON CONFLICT ("fileKey") DO UPDATE SET embedding = EXCLUDED.embedding, "createdAt" = NOW()',
+            (file_key, embedding_file)
+        )
+        conn.commit()
         cur.execute('SELECT id, url, "originalName" FROM "EmployeeDocument" WHERE "userId" = %s', (user_id,))
         files = cur.fetchall()
         files_list = [{"id": f[0], "url": f[1], "filename": f[2]} for f in files]
         cur.close()
         conn.close()
-        return {"message": "Archivo subido", "files": files_list}
+        return {"message": "Archivo subido y embedding generado", "files": files_list}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -157,13 +162,13 @@ def upload_user_file(user_id: str, file: UploadFile = File(...), current_admin: 
 def delete_user_file(user_id: str, file_id: str, current_admin: str = Depends(get_current_admin)):
     """
     Elimina un archivo específico:
-      - Se borra el archivo en GCS.
-      - Se elimina el registro en EmployeeDocument.
+      - Borra el archivo en GCS.
+      - Elimina el registro en EmployeeDocument.
+      - Elimina el embedding asociado en FileEmbedding.
     """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Obtener el registro del archivo
         cur.execute('SELECT "fileKey" FROM "EmployeeDocument" WHERE id = %s AND "userId" = %s', (file_id, user_id))
         result = cur.fetchone()
         if not result:
@@ -172,15 +177,15 @@ def delete_user_file(user_id: str, file_id: str, current_admin: str = Depends(ge
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(file_key)
         blob.delete()
-        # Eliminar el registro del archivo
         cur.execute('DELETE FROM "EmployeeDocument" WHERE id = %s', (file_id,))
         conn.commit()
-        # Obtener archivos actualizados del usuario
+        cur.execute('DELETE FROM "FileEmbedding" WHERE "fileKey" = %s', (file_key,))
+        conn.commit()
         cur.execute('SELECT id, url, "originalName" FROM "EmployeeDocument" WHERE "userId" = %s', (user_id,))
         files = cur.fetchall()
         files_list = [{"id": f[0], "url": f[1], "filename": f[2]} for f in files]
         cur.close()
         conn.close()
-        return {"message": "Archivo eliminado", "files": files_list}
+        return {"message": "Archivo y su embedding eliminados", "files": files_list}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
