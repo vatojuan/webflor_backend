@@ -157,7 +157,7 @@ async def confirm_email(code: str = Query(...)):
             name_from_cv = user_email.split("@")[0]
         print(f"✅ Nombre extraído con OpenAI: {name_from_cv}")
 
-        # Generar descripción automática con OpenAI
+        # Generar descripción automática con OpenAI(revisar)
         description_prompt = [
             {"role": "system", "content": "Eres un experto en recursos humanos."},
             {"role": "user", "content": f"Genera una descripción profesional para el siguiente CV:\n\n{text_content[:2000]}"}
