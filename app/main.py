@@ -19,8 +19,7 @@ from app.routers import cv_admin_upload
 # Importar el router de ofertas de empleo
 from app.routers import job as job_router
 
-# Importar el router para la gestión de usuarios (nuevos endpoints)
-from app.routers import admin_users
+
 
 # Configuración de JWT (debe coincidir con la usada en backend/auth.py)
 SECRET_KEY = "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12"
@@ -90,9 +89,6 @@ app.include_router(
     prefix="/api/job",
     tags=["job"]
 )
-
-# Registrar el router para la gestión de usuarios
-app.include_router(admin_users.router)
 
 @app.get("/admin/protected", tags=["admin"])
 def admin_protected(current_admin: str = Depends(get_current_admin)):
