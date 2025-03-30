@@ -16,8 +16,8 @@ from backend.auth import router as admin_router
 # Importar el router de carga masiva de CVs
 from app.routers import cv_admin_upload
 
-# Importar el router de ofertas de empleo
-from app.routers import job as job_router
+# Importar el router de ofertas de empleo (endpoints para administrar ofertas)
+from app.routers import job_admin
 
 # Importar el router para la gestión de usuarios (nuevos endpoints)
 from app.routers import admin_users
@@ -84,9 +84,9 @@ app.include_router(
     dependencies=[Depends(get_current_admin)]
 )
 
-# Registrar el router de ofertas de empleo
+# Registrar el router de ofertas de empleo (endpoints para administrar ofertas)
 app.include_router(
-    job_router.router,
+    job_admin.router,
     prefix="/api/job",
     tags=["job"]
 )
