@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request
+from datetime import datetime
 import os
 import psycopg2
 import openai
@@ -28,14 +29,15 @@ def get_db_connection():
 @router.get("/admin_offers")
 async def get_admin_offers():
     """
-    Devuelve todas las ofertas de la tabla jobs.
+    Devuelve todas las ofertas de la tabla Job.
     """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        # Se usa "Job" (con mayúscula) entre comillas dobles para respetar el nombre exacto de la tabla.
         cur.execute("""
             SELECT id, title, description, requirements, "expirationDate", "userId"
-            FROM jobs
+            FROM "Job"
         """)
         rows = cur.fetchall()
         offers = []
@@ -52,14 +54,13 @@ async def get_admin_offers():
         conn.close()
         return {"offers": offers}
     except Exception as e:
-        # Aquí logueamos el error para revisarlo
         print(f"Error al obtener ofertas: {e}")
         raise HTTPException(status_code=500, detail=f"Error al obtener las ofertas: {e}")
 
 @router.put("/update-admin")
 async def update_admin_offer(request: Request):
     """
-    Actualiza una oferta de trabajo: se actualizan título, descripción, requisitos y fecha de expiración,
+    Actualiza una oferta de trabajo en la tabla Job: se actualizan título, descripción, requisitos y fecha de expiración,
     y se recalcula el embedding concatenando estos campos.
     """
     data = await request.json()
@@ -88,7 +89,7 @@ async def update_admin_offer(request: Request):
         conn = get_db_connection()
         cur = conn.cursor()
         update_query = """
-            UPDATE jobs
+            UPDATE "Job"
             SET title = %s,
                 description = %s,
                 requirements = %s,
@@ -98,7 +99,15 @@ async def update_admin_offer(request: Request):
             WHERE id = %s
             RETURNING id, title, description, requirements, "expirationDate", "userId";
         """
-        cur.execute(update_query, (title, description, requirements, expirationDate if expirationDate else None, userId, embedding, job_id))
+        cur.execute(update_query, (
+            title,
+            description,
+            requirements,
+            expirationDate if expirationDate else None,
+            userId,
+            embedding,
+            job_id
+        ))
         updated_row = cur.fetchone()
         if not updated_row:
             raise HTTPException(status_code=404, detail="Oferta no encontrada")
@@ -120,7 +129,7 @@ async def update_admin_offer(request: Request):
 @router.delete("/delete-admin")
 async def delete_admin_offer(request: Request):
     """
-    Elimina una oferta de la BD según el jobId enviado.
+    Elimina una oferta de la tabla Job según el jobId enviado.
     """
     data = await request.json()
     job_id = data.get("jobId")
@@ -129,7 +138,8 @@ async def delete_admin_offer(request: Request):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("DELETE FROM jobs WHERE id = %s RETURNING id", (job_id,))
+        # Se usa "Job" para eliminar la oferta
+        cur.execute('DELETE FROM "Job" WHERE id = %s RETURNING id', (job_id,))
         deleted = cur.fetchone()
         if not deleted:
             raise HTTPException(status_code=404, detail="Oferta no encontrada")
