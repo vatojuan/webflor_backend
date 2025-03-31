@@ -3,6 +3,7 @@ from datetime import datetime
 import os
 import psycopg2
 import openai
+import traceback
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -34,7 +35,6 @@ async def get_admin_offers():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Se usa "Job" entre comillas dobles para respetar el nombre exacto de la tabla.
         cur.execute("""
             SELECT id, title, description, requirements, "expirationDate", "userId"
             FROM "Job"
@@ -59,10 +59,16 @@ async def get_admin_offers():
 
 @router.put("/update-admin")
 async def update_admin_offer(request: Request):
+    """
+    Actualiza una oferta de la tabla Job: se actualizan título, descripción, requisitos y fecha de expiración,
+    y se recalcula el embedding concatenando estos campos.
+    Nota: No se modifica el campo userId, se conserva el valor original.
+    """
     try:
         data = await request.json()
         print("📥 Datos recibidos:", data)
 
+        # Obtener y convertir campos necesarios
         job_id = data.get("id")
         title = data.get("title")
         description = data.get("description")
@@ -73,22 +79,24 @@ async def update_admin_offer(request: Request):
         if not job_id or not title or not description or not userId:
             raise HTTPException(status_code=400, detail="Faltan campos obligatorios")
 
-        # Convertir IDs a int
-        job_id_int = int(job_id)
-        userId_int = int(userId)
+        try:
+            job_id_int = int(job_id)
+            userId_int = int(userId)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Error al convertir job_id o userId a entero: {e}")
 
-        # Convertir fecha
+        # Convertir expirationDate (se asume formato 'YYYY-MM-DD')
         exp_date = None
         if expirationDate:
             try:
                 exp_date = datetime.fromisoformat(expirationDate)
             except Exception as e:
-                print("❌ Error al convertir la fecha:", expirationDate, e)
-                raise HTTPException(status_code=400, detail="Fecha inválida")
+                print("❌ Error al convertir fecha:", expirationDate, e)
+                raise HTTPException(status_code=400, detail="Formato de fecha inválido. Use 'YYYY-MM-DD'")
 
-        print("📦 Preparando texto para embedding...")
+        # Recalcular el embedding usando OpenAI
         text_to_embed = f"{title} {description} {requirements or ''}"
-        print("🔠 Texto:", text_to_embed)
+        print("🔠 Texto para embedding:", text_to_embed)
 
         embedding_response = openai.Embedding.create(
             input=text_to_embed,
@@ -97,7 +105,7 @@ async def update_admin_offer(request: Request):
         embedding = embedding_response['data'][0]['embedding']
         print("✅ Embedding generado")
 
-        # Ejecutar update
+        # Ejecutar la actualización en la base de datos
         conn = get_db_connection()
         cur = conn.cursor()
         update_query = """
@@ -111,18 +119,22 @@ async def update_admin_offer(request: Request):
             WHERE id = %s
             RETURNING id, title, description, requirements, "expirationDate", "userId";
         """
-        print("🚀 Ejecutando UPDATE en base de datos")
+        print("🚀 Ejecutando UPDATE en la BD...")
         cur.execute(update_query, (
-            title, description, requirements, exp_date, userId_int, embedding, job_id_int
+            title,
+            description,
+            requirements,
+            exp_date,
+            userId_int,
+            embedding,
+            job_id_int
         ))
         updated_row = cur.fetchone()
+        if not updated_row:
+            raise HTTPException(status_code=404, detail="Oferta no encontrada")
         conn.commit()
         cur.close()
         conn.close()
-
-        if not updated_row:
-            raise HTTPException(status_code=404, detail="Oferta no encontrada")
-
         print("✅ Oferta actualizada:", updated_row)
 
         return {
@@ -133,10 +145,8 @@ async def update_admin_offer(request: Request):
             "expirationDate": updated_row[4].isoformat() if updated_row[4] else None,
             "userId": updated_row[5]
         }
-
-    except Exception as e:
-        import traceback
-        print("❌ EXCEPCIÓN EN EL BACKEND")
+    except Exception:
+        print("❌ Error en update-admin:")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
@@ -145,14 +155,13 @@ async def delete_admin_offer(request: Request):
     """
     Elimina una oferta de la tabla Job según el jobId enviado.
     """
-    data = await request.json()
-    job_id = data.get("jobId")
-    if not job_id:
-        raise HTTPException(status_code=400, detail="JobId es requerido")
     try:
+        data = await request.json()
+        job_id = data.get("jobId")
+        if not job_id:
+            raise HTTPException(status_code=400, detail="JobId es requerido")
         conn = get_db_connection()
         cur = conn.cursor()
-        # Se usa "Job" para eliminar la oferta
         cur.execute('DELETE FROM "Job" WHERE id = %s RETURNING id', (job_id,))
         deleted = cur.fetchone()
         if not deleted:
