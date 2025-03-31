@@ -2,14 +2,16 @@ from fastapi import APIRouter, HTTPException, Request
 from datetime import datetime
 import os
 import psycopg2
-import openai
 import traceback
 from dotenv import load_dotenv
 
+# Importar la nueva interfaz de OpenAI
+from openai import OpenAI
+
 load_dotenv()
 
-# Configurar OpenAI con la API key
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Crear el cliente de OpenAI
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 router = APIRouter()
 
@@ -62,7 +64,7 @@ async def update_admin_offer(request: Request):
     """
     Actualiza una oferta de la tabla Job: se actualizan título, descripción, requisitos y fecha de expiración,
     y se recalcula el embedding concatenando estos campos.
-    Nota: No se modifica el campo userId, se conserva el valor original.
+    Nota: El campo userId se conserva sin modificar.
     """
     try:
         data = await request.json()
@@ -94,15 +96,15 @@ async def update_admin_offer(request: Request):
                 print("❌ Error al convertir fecha:", expirationDate, e)
                 raise HTTPException(status_code=400, detail="Formato de fecha inválido. Use 'YYYY-MM-DD'")
 
-        # Recalcular el embedding usando OpenAI
+        # Recalcular el embedding usando la nueva interfaz de OpenAI
         text_to_embed = f"{title} {description} {requirements or ''}"
         print("🔠 Texto para embedding:", text_to_embed)
 
-        embedding_response = openai.Embedding.create(
+        response = client.embeddings.create(
             input=text_to_embed,
             model="text-embedding-ada-002"
         )
-        embedding = embedding_response['data'][0]['embedding']
+        embedding = response.data[0].embedding
         print("✅ Embedding generado")
 
         # Ejecutar la actualización en la base de datos
