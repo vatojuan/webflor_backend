@@ -97,7 +97,7 @@ app.include_router(
 # Registrar el router de ofertas de empleo para gestión (definido en job_admin.py)
 app.include_router(
     job_admin.router,
-    prefix="/api/job/admin",
+    prefix="/api/job",  # Usamos el mismo prefijo para que el endpoint sea /api/job/admin_offers
     tags=["job_admin"]
 )
 
