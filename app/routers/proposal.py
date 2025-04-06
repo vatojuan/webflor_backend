@@ -1,12 +1,13 @@
 # proposal.py
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.security import OAuth2PasswordBearer
-from datetime import datetime
+import time
+import logging
 import smtplib
 from email.message import EmailMessage
 import os
-import logging
+from datetime import datetime
 
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi.security import OAuth2PasswordBearer
 from database import get_db_connection
 
 router = APIRouter(
@@ -24,10 +25,9 @@ logger = logging.getLogger(__name__)
 def send_proposal_email(employer_email: str, subject: str, body: str, attachment_url: str = None) -> bool:
     """
     Envía un email de propuesta al empleador. Si se provee attachment_url,
-    se adjunta como un link (o se puede implementar descarga y envío de archivo).
+    se incluye en el body.
     """
     try:
-        # Configuración SMTP (ejemplo usando variables de entorno)
         smtp_server = os.getenv("SMTP_SERVER")
         smtp_port = int(os.getenv("SMTP_PORT", 587))
         smtp_user = os.getenv("SMTP_USER")
@@ -37,14 +37,10 @@ def send_proposal_email(employer_email: str, subject: str, body: str, attachment
         msg["Subject"] = subject
         msg["From"] = smtp_user
         msg["To"] = employer_email
-        # Construimos el body con los datos
         email_body = body
         if attachment_url:
-            email_body += f"\n\nPuedes ver el CV aquí: {attachment_url}"
+            email_body += f"\n\nRevisa el CV aquí: {attachment_url}"
         msg.set_content(email_body)
-        
-        # Si quisieras adjuntar el archivo real, aquí se descargaría y se adjuntaría.
-        # Por ahora usamos el link como referencia.
         
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
@@ -59,24 +55,154 @@ def send_proposal_email(employer_email: str, subject: str, body: str, attachment
 # --- Función placeholder para enviar mensaje de WhatsApp ---
 def send_whatsapp_message(phone: str, message: str) -> bool:
     """
-    Envía un mensaje de WhatsApp. Esta función es un placeholder; se debe implementar
-    la integración con la API de WhatsApp (por ejemplo, con Baileys o similar).
+    Envía un mensaje de WhatsApp. Esta función es un placeholder y debe adaptarse
+    a la API real (por ejemplo, con Baileys).
     """
     try:
-        # Aquí colocarías la lógica real de integración.
         logger.info(f"Enviando WhatsApp a {phone}: {message}")
+        # Implementación real aquí.
         return True
     except Exception as e:
         logger.error(f"Error al enviar WhatsApp: {e}")
         return False
 
-# --- Endpoint: Listar todas las propuestas ---
+# --- Función para procesar la propuesta automática en background ---
+def process_auto_proposal(proposal_id: int):
+    """
+    Espera 5 minutos y, si la propuesta sigue en 'waiting', la marca como 'sent'
+    y envía el email (y WhatsApp si aplica).
+    """
+    logger.info(f"Iniciando background task para propuesta {proposal_id}")
+    time.sleep(300)  # 5 minutos de espera
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # Verificar el estado actual de la propuesta
+        cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id = %s", (proposal_id,))
+        row = cur.fetchone()
+        if not row:
+            logger.error(f"Propuesta {proposal_id} no encontrada en background task.")
+            return
+        status, job_id, applicant_id = row
+        if status != "waiting":
+            logger.info(f"La propuesta {proposal_id} ya no está en estado 'waiting' (actual: {status}).")
+            return
+        
+        # Obtener datos del Job (oferta) para armar el email
+        cur.execute("SELECT title, \"userId\" FROM \"Job\" WHERE id = %s", (job_id,))
+        job_row = cur.fetchone()
+        if not job_row:
+            logger.error(f"Oferta {job_id} no encontrada para la propuesta {proposal_id}.")
+            return
+        job_title, employer_id = job_row
+
+        # Obtener datos del postulante
+        cur.execute("SELECT name, email, \"cvUrl\" FROM \"User\" WHERE id = %s", (applicant_id,))
+        applicant_row = cur.fetchone()
+        if not applicant_row:
+            logger.error(f"Postulante {applicant_id} no encontrado para la propuesta {proposal_id}.")
+            return
+        applicant_name, applicant_email, cv_url = applicant_row
+
+        # Obtener datos del empleador
+        cur.execute("SELECT name, email, phone FROM \"User\" WHERE id = %s", (employer_id,))
+        employer_row = cur.fetchone()
+        if not employer_row:
+            logger.error(f"Empleador {employer_id} no encontrado para la propuesta {proposal_id}.")
+            return
+        employer_name, employer_email, employer_phone = employer_row
+
+        # Preparar plantilla de email
+        email_subject = f"Nueva propuesta para tu oferta: {job_title}"
+        email_body = (
+            f"Hola {employer_name},\n\n"
+            f"El postulante {applicant_name} ha aplicado a tu oferta '{job_title}'.\n"
+            f"Puedes contactar a {applicant_name} a través de: {applicant_email}.\n"
+            f"Revisa el CV aquí: {cv_url}\n\n"
+            "Saludos,\nEquipo FAP Mendoza"
+        )
+
+        # Enviar email
+        if not send_proposal_email(employer_email, email_subject, email_body, attachment_url=cv_url):
+            logger.error(f"No se pudo enviar el email para la propuesta {proposal_id}.")
+            return
+
+        # Enviar WhatsApp si el empleador tiene número
+        if employer_phone:
+            whatsapp_msg = (
+                f"Hola {employer_name}, tenés una nueva propuesta para tu oferta '{job_title}'. "
+                "Revisa tu correo para más detalles."
+            )
+            send_whatsapp_message(employer_phone, whatsapp_msg)
+
+        # Actualizar la propuesta: marcar como 'sent'
+        cur.execute("""
+            UPDATE proposals
+            SET status = 'sent', sent_at = NOW()
+            WHERE id = %s
+        """, (proposal_id,))
+        conn.commit()
+        logger.info(f"Propuesta {proposal_id} procesada y enviada exitosamente.")
+    except Exception as e:
+        logger.error(f"Error en process_auto_proposal para propuesta {proposal_id}: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+# --- Endpoint para crear propuestas ---
+@router.post("/create")
+def create_proposal(proposal_data: dict, background_tasks: BackgroundTasks, token: str = Depends(oauth2_scheme)):
+    """
+    Crea una propuesta. Se espera recibir un JSON con:
+      - job_id: ID de la oferta
+      - applicant_id: ID del postulante
+      - label: 'automatic' o 'manual'
+    
+    Si la propuesta es automática, se inserta con status 'waiting' y se agenda un task
+    para enviarla en 5 minutos.
+    """
+    required_fields = ["job_id", "applicant_id", "label"]
+    if not all(field in proposal_data for field in required_fields):
+        raise HTTPException(status_code=400, detail="Faltan campos obligatorios")
+    
+    job_id = proposal_data["job_id"]
+    applicant_id = proposal_data["applicant_id"]
+    label = proposal_data["label"]
+
+    # Si es automática, establecemos status 'waiting'
+    status = "waiting" if label == "automatic" else "pending"
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO proposals (job_id, applicant_id, label, status)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id;
+        """, (job_id, applicant_id, label, status))
+        proposal_id = cur.fetchone()[0]
+        conn.commit()
+
+        logger.info(f"Propuesta {proposal_id} creada con status '{status}'.")
+
+        # Si es automática, agenda la tarea de envío en 5 minutos
+        if label == "automatic":
+            background_tasks.add_task(process_auto_proposal, proposal_id)
+
+        return {"message": "Propuesta creada", "proposal_id": proposal_id}
+    except Exception as e:
+        logger.error(f"Error al crear propuesta: {e}")
+        raise HTTPException(status_code=500, detail="Error al crear la propuesta")
+    finally:
+        cur.close()
+        conn.close()
+
+# --- Endpoint para listar propuestas (como antes) ---
 @router.get("/")
 def get_all_proposals(token: str = Depends(oauth2_scheme)):
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # Se obtiene info de propuesta, oferta y postulante; y además el empleador de la oferta
         cur.execute("""
             SELECT 
                 p.id,
@@ -99,7 +225,7 @@ def get_all_proposals(token: str = Depends(oauth2_scheme)):
             FROM proposals p
             JOIN "Job" j ON p.job_id = j.id
             JOIN "User" ua ON p.applicant_id = ua.id
-            JOIN "User" ue ON j.userId = ue.id
+            JOIN "User" ue ON j."userId" = ue.id
             ORDER BY p.created_at DESC;
         """)
         rows = cur.fetchall()
@@ -109,100 +235,6 @@ def get_all_proposals(token: str = Depends(oauth2_scheme)):
     except Exception as e:
         logger.error(f"Error al obtener propuestas: {e}")
         raise HTTPException(status_code=500, detail="Error al obtener propuestas")
-    finally:
-        cur.close()
-        conn.close()
-
-# --- Endpoint: Enviar propuesta ---
-@router.patch("/{proposal_id}/send")
-def send_proposal(proposal_id: int, token: str = Depends(oauth2_scheme)):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        # Se valida que la propuesta exista y esté pendiente y sea manual
-        cur.execute("""
-            SELECT status, label, job_id, applicant_id
-            FROM proposals
-            WHERE id = %s
-        """, (proposal_id,))
-        result = cur.fetchone()
-        if not result:
-            raise HTTPException(status_code=404, detail="Propuesta no encontrada")
-        status, proposal_label, job_id, applicant_id = result
-        if proposal_label != "manual" or status != "pending":
-            raise HTTPException(status_code=400, detail="La propuesta no puede ser enviada (no es manual o ya fue enviada)")
-
-        # Obtener información de la oferta (Job) y del empleador
-        cur.execute("""
-            SELECT title, "userId"
-            FROM "Job"
-            WHERE id = %s
-        """, (job_id,))
-        job_result = cur.fetchone()
-        if not job_result:
-            raise HTTPException(status_code=404, detail="Oferta no encontrada")
-        job_title, employer_id = job_result
-
-        # Obtener datos del postulante
-        cur.execute("""
-            SELECT name, email, "cvUrl"
-            FROM "User"
-            WHERE id = %s
-        """, (applicant_id,))
-        applicant_result = cur.fetchone()
-        if not applicant_result:
-            raise HTTPException(status_code=404, detail="Postulante no encontrado")
-        applicant_name, applicant_email, cv_url = applicant_result
-
-        # Obtener datos del empleador
-        cur.execute("""
-            SELECT name, email, phone
-            FROM "User"
-            WHERE id = %s
-        """, (employer_id,))
-        employer_result = cur.fetchone()
-        if not employer_result:
-            raise HTTPException(status_code=404, detail="Empleador no encontrado")
-        employer_name, employer_email, employer_phone = employer_result
-
-        # Preparar el email con la plantilla
-        email_subject = f"Nueva propuesta para tu oferta: {job_title}"
-        email_body = (
-            f"Hola {employer_name},\n\n"
-            f"El postulante {applicant_name} ha aplicado a tu oferta '{job_title}'.\n"
-            f"Puedes contactar a {applicant_name} en: {applicant_email}.\n"
-            f"Revisa su CV aquí: {cv_url}\n\n"
-            "Saludos,\nTu equipo de FAP Mendoza"
-        )
-
-        # Enviar email
-        email_sent = send_proposal_email(employer_email, email_subject, email_body, attachment_url=cv_url)
-        if not email_sent:
-            raise HTTPException(status_code=500, detail="Error al enviar el email al empleador")
-
-        # Enviar WhatsApp (si se tiene número y se quiere integrar)
-        if employer_phone:
-            whatsapp_message = (
-                f"Hola {employer_name}, tenés una nueva propuesta para tu oferta '{job_title}'. "
-                f"Revisa tu correo para más detalles."
-            )
-            send_whatsapp_message(employer_phone, whatsapp_message)
-
-        # Actualizar la propuesta: marcar como enviada y registrar el timestamp
-        cur.execute("""
-            UPDATE proposals
-            SET status = 'sent', sent_at = NOW()
-            WHERE id = %s
-        """, (proposal_id,))
-        conn.commit()
-
-        logger.info(f"Propuesta {proposal_id} enviada correctamente a {employer_email}")
-        return {"message": "Propuesta enviada exitosamente"}
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        logger.error(f"Error al enviar propuesta: {e}")
-        raise HTTPException(status_code=500, detail="Error interno al enviar propuesta")
     finally:
         cur.close()
         conn.close()
