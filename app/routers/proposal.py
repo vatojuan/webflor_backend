@@ -8,7 +8,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
-from database import get_db_connection
+from app.database import get_db_connection
 
 router = APIRouter(
     prefix="/api/proposals",
