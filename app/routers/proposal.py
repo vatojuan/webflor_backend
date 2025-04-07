@@ -8,7 +8,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
-from app.database import get_db_connection
+from app.database import engine  # Importamos el engine de SQLAlchemy
 
 router = APIRouter(
     prefix="/api/proposals",
@@ -21,6 +21,13 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- Función para obtener conexión usando el engine de SQLAlchemy ---
+def get_db_connection():
+    """
+    Retorna una conexión raw (DBAPI) a la base de datos utilizando el engine de SQLAlchemy.
+    """
+    return engine.raw_connection()
+
 # --- Función para enviar email de propuesta ---
 def send_proposal_email(employer_email: str, subject: str, body: str, attachment_url: str = None) -> bool:
     """
@@ -31,8 +38,7 @@ def send_proposal_email(employer_email: str, subject: str, body: str, attachment
         smtp_server = os.getenv("SMTP_SERVER")
         smtp_port = int(os.getenv("SMTP_PORT", 587))
         smtp_user = os.getenv("SMTP_USER")
-        smtp_password = os.getenv("SMTP_PASSWORD")
-        
+        smtp_password = os.getenv("SMTP_PASS")  # Asegurate de que la variable se llame SMTP_PASS
         msg = EmailMessage()
         msg["Subject"] = subject
         msg["From"] = smtp_user
@@ -197,7 +203,7 @@ def create_proposal(proposal_data: dict, background_tasks: BackgroundTasks, toke
         cur.close()
         conn.close()
 
-# --- Endpoint para listar propuestas (como antes) ---
+# --- Endpoint para listar propuestas ---
 @router.get("/")
 def get_all_proposals(token: str = Depends(oauth2_scheme)):
     conn = get_db_connection()
