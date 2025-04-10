@@ -102,14 +102,14 @@ app.include_router(
     dependencies=[Depends(get_current_admin)]
 )
 
-# Registrar el router de ofertas de empleo para creación (definido en job.py)
+# Registrar el router de ofertas de empleo para creación (job.py)
 app.include_router(
     job.router,
     prefix="/api/job",
     tags=["job"]
 )
 
-# Registrar el router de ofertas de empleo para gestión (definido en job_admin.py)
+# Registrar el router de ofertas de empleo para gestión (job_admin.py)
 app.include_router(
     job_admin.router,
     prefix="/api/job",  # Usamos el mismo prefijo para que el endpoint sea /api/job/admin_offers
