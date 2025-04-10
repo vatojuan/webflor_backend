@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -34,6 +34,7 @@ ALGORITHM = "HS256"
 
 app = FastAPI()
 
+# Middleware CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -44,6 +45,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Middleware para loguear headers y detectar posibles redirecciones
+@app.middleware("http")
+async def log_request_headers(request: Request, call_next):
+    print("📥 Incoming request:", request.method, request.url.path)
+    print("🔍 x-forwarded-proto:", request.headers.get("x-forwarded-proto"))
+    print("🔍 Host:", request.headers.get("host"))
+    print("🔍 Authorization:", request.headers.get("authorization"))
+    response = await call_next(request)
+    print("📤 Response status:", response.status_code)
+    return response
 
 # Registrar routers públicos
 app.include_router(public_auth.router)
