@@ -1,4 +1,3 @@
-# proposal.py
 import time
 import logging
 import smtplib
@@ -9,6 +8,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
 from app.database import engine  # Importamos el engine de SQLAlchemy
+from backend.auth import get_current_admin  # Asegurate de tener esta función en tu módulo de autenticación
 
 router = APIRouter(
     prefix="/api/proposals",
@@ -38,7 +38,7 @@ def send_proposal_email(employer_email: str, subject: str, body: str, attachment
         smtp_server = os.getenv("SMTP_SERVER")
         smtp_port = int(os.getenv("SMTP_PORT", 587))
         smtp_user = os.getenv("SMTP_USER")
-        smtp_password = os.getenv("SMTP_PASS")  # Asegurate de que la variable se llame SMTP_PASS
+        smtp_password = os.getenv("SMTP_PASS")  # Usá SMTP_PASS según tu variable
         msg = EmailMessage()
         msg["Subject"] = subject
         msg["From"] = smtp_user
@@ -79,7 +79,7 @@ def process_auto_proposal(proposal_id: int):
     y envía el email (y WhatsApp si aplica).
     """
     logger.info(f"Iniciando background task para propuesta {proposal_id}")
-    time.sleep(300)  # 5 minutos de espera
+    time.sleep(300)  # Espera 5 minutos (300 segundos)
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -204,8 +204,8 @@ def create_proposal(proposal_data: dict, background_tasks: BackgroundTasks, toke
         conn.close()
 
 # --- Endpoint para listar propuestas ---
-@router.get("/")
-def get_all_proposals(token: str = Depends(oauth2_scheme)):
+@router.get("/", dependencies=[Depends(get_current_admin)])
+def get_all_proposals():
     conn = get_db_connection()
     cur = conn.cursor()
     try:
