@@ -7,8 +7,8 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
-from app.database import engine  # Importamos el engine de SQLAlchemy
-from backend.auth import get_current_admin  # Asegurate de tener esta función en tu módulo de autenticación
+from jose import JWTError, jwt
+from app.database import engine  # Usamos el engine de SQLAlchemy
 
 router = APIRouter(
     prefix="/api/proposals",
@@ -17,7 +17,7 @@ router = APIRouter(
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
-# Configurar logging
+# Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -28,17 +28,40 @@ def get_db_connection():
     """
     return engine.raw_connection()
 
+# --- Definición local de get_current_admin ---
+def get_current_admin(token: str = Depends(oauth2_scheme)):
+    SECRET_KEY = "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12"
+    ALGORITHM = "HS256"
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Token no proporcionado"
+        )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if not username:
+            raise HTTPException(
+                status_code=401,
+                detail="Token inválido o sesión expirada"
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=401,
+            detail="Token inválido o sesión expirada"
+        )
+    return username
+
 # --- Función para enviar email de propuesta ---
 def send_proposal_email(employer_email: str, subject: str, body: str, attachment_url: str = None) -> bool:
     """
-    Envía un email de propuesta al empleador. Si se provee attachment_url,
-    se incluye en el body.
+    Envía un email de propuesta al empleador. Si se provee attachment_url, se incluye en el body.
     """
     try:
         smtp_server = os.getenv("SMTP_SERVER")
         smtp_port = int(os.getenv("SMTP_PORT", 587))
         smtp_user = os.getenv("SMTP_USER")
-        smtp_password = os.getenv("SMTP_PASS")  # Usá SMTP_PASS según tu variable
+        smtp_password = os.getenv("SMTP_PASS")  # Usá SMTP_PASS
         msg = EmailMessage()
         msg["Subject"] = subject
         msg["From"] = smtp_user
@@ -79,7 +102,7 @@ def process_auto_proposal(proposal_id: int):
     y envía el email (y WhatsApp si aplica).
     """
     logger.info(f"Iniciando background task para propuesta {proposal_id}")
-    time.sleep(300)  # Espera 5 minutos (300 segundos)
+    time.sleep(300)  # 5 minutos de espera
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -94,7 +117,7 @@ def process_auto_proposal(proposal_id: int):
             logger.info(f"La propuesta {proposal_id} ya no está en estado 'waiting' (actual: {status}).")
             return
         
-        # Obtener datos del Job (oferta) para armar el email
+        # Obtener datos del Job (oferta)
         cur.execute("SELECT title, \"userId\" FROM \"Job\" WHERE id = %s", (job_id,))
         job_row = cur.fetchone()
         if not job_row:
@@ -118,7 +141,7 @@ def process_auto_proposal(proposal_id: int):
             return
         employer_name, employer_email, employer_phone = employer_row
 
-        # Preparar plantilla de email
+        # Preparar la plantilla del email
         email_subject = f"Nueva propuesta para tu oferta: {job_title}"
         email_body = (
             f"Hola {employer_name},\n\n"
@@ -141,7 +164,7 @@ def process_auto_proposal(proposal_id: int):
             )
             send_whatsapp_message(employer_phone, whatsapp_msg)
 
-        # Actualizar la propuesta: marcar como 'sent'
+        # Actualizar la propuesta a 'sent'
         cur.execute("""
             UPDATE proposals
             SET status = 'sent', sent_at = NOW()
@@ -175,7 +198,7 @@ def create_proposal(proposal_data: dict, background_tasks: BackgroundTasks, toke
     applicant_id = proposal_data["applicant_id"]
     label = proposal_data["label"]
 
-    # Si es automática, establecemos status 'waiting'
+    # Si es automática, el status se establece en 'waiting'
     status = "waiting" if label == "automatic" else "pending"
     
     conn = get_db_connection()
@@ -191,7 +214,7 @@ def create_proposal(proposal_data: dict, background_tasks: BackgroundTasks, toke
 
         logger.info(f"Propuesta {proposal_id} creada con status '{status}'.")
 
-        # Si es automática, agenda la tarea de envío en 5 minutos
+        # Si la propuesta es automática, agenda la tarea para su procesamiento en 5 minutos
         if label == "automatic":
             background_tasks.add_task(process_auto_proposal, proposal_id)
 
@@ -203,7 +226,7 @@ def create_proposal(proposal_data: dict, background_tasks: BackgroundTasks, toke
         cur.close()
         conn.close()
 
-# --- Endpoint para listar propuestas ---
+# --- Endpoint para listar propuestas (protegido por get_current_admin) ---
 @router.get("/", dependencies=[Depends(get_current_admin)])
 def get_all_proposals():
     conn = get_db_connection()
