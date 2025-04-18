@@ -32,7 +32,12 @@ from app.routers import proposal
 SECRET_KEY = "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12"
 ALGORITHM = "HS256"
 
-app = FastAPI()
+app = FastAPI(
+    proxy_headers=True,
+    root_path="/",  # útil si usás subdominios o rutas base
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
 # Middleware CORS
 app.add_middleware(
