@@ -3,19 +3,18 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# Leer URL desde env var, con fallback
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:Pachamama190@db.apnfioxjddccokgkljvd.supabase.co:5432/postgres"
-)
+# Toma la URL desde la variable de entorno DATABASE_URL
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL no está definida")
 
-# Asegurar SSL
-if "?" not in DATABASE_URL:
-    DATABASE_URL += "?sslmode=require"
-
+# Creamos engine con SSL obligatorio
 engine = create_engine(
     DATABASE_URL,
+    pool_pre_ping=True,
     connect_args={"sslmode": "require"}
 )
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
 Base = declarative_base()
