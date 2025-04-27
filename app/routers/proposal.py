@@ -188,7 +188,8 @@ def process_auto_proposal(proposal_id: int):
 # Endpoints
 # --------------------------------------------------
 
-@router.post("/create", dependencies=[Depends(get_current_admin)])
+# Ahora create_proposal NO requiere token de admin
+@router.post("/create")
 def create_proposal(payload: dict, background_tasks: BackgroundTasks):
     """
     Crea una propuesta. JSON con:
@@ -245,7 +246,7 @@ def send_manual_proposal(proposal_id: int):
         if status != "pending":
             raise HTTPException(status_code=400, detail="No está en status 'pending'")
 
-        # Reutilizamos lógica de envio
+        # Reutilizamos lógica de envío
         cur.execute('SELECT title, "userId" FROM "Job" WHERE id = %s', (job_id,))
         job_title, employer_id = cur.fetchone()
 
@@ -284,7 +285,7 @@ def send_manual_proposal(proposal_id: int):
         conn.close()
 
 
-@router.get("/")
+@router.get("/", dependencies=[Depends(get_current_admin)])
 def list_proposals():
     """
     Lista todas las propuestas ordenadas por fecha de creación.
@@ -315,7 +316,6 @@ def list_proposals():
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
         return {"proposals": [dict(zip(cols, r)) for r in rows]}
-
     except Exception as e:
         logger.error(f"Error al listar propuestas: {e}")
         raise HTTPException(status_code=500, detail="Error interno")
