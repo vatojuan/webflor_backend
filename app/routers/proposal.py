@@ -1,9 +1,11 @@
 # app/routers/proposal.py
 
+import os
 import time
 import logging
-import os
 import smtplib
+
+from dotenv import load_dotenv
 from email.message import EmailMessage
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
@@ -12,6 +14,23 @@ from jose import JWTError, jwt
 
 from app.database import engine
 
+# --------------------------------------------------
+# Carga de .env y configuración
+# --------------------------------------------------
+load_dotenv()
+
+# Si no está en .env, usar mismo secreto que en main.py
+SECRET_KEY = os.getenv(
+    "SECRET_KEY",
+    "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12"
+)
+ALGORITHM = "HS256"
+
+# Configuración de logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Router con prefijo /api/proposals
 router = APIRouter(
     prefix="/api/proposals",
     tags=["proposals"]
@@ -19,13 +38,11 @@ router = APIRouter(
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
-# Logging setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
+# --------------------------------------------------
+# Dependencia para endpoints protegidos
+# --------------------------------------------------
 def get_current_admin(token: str = Depends(oauth2_scheme)):
-    SECRET_KEY = os.getenv("SECRET_KEY")
-    ALGORITHM = "HS256"
     if not token:
         raise HTTPException(status_code=401, detail="Token no proporcionado")
     try:
@@ -37,12 +54,20 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido o expirado")
 
+
+# --------------------------------------------------
+# Conexión a la base de datos (raw cursor)
+# --------------------------------------------------
 def get_db_connection():
     """
     Devuelve una raw_connection() de SQLAlchemy para usar cursores manuales.
     """
     return engine.raw_connection()
 
+
+# --------------------------------------------------
+# Funciones de envío (email / WhatsApp)
+# --------------------------------------------------
 def send_proposal_email(employer_email: str, subject: str, body: str, attachment_url: str = None) -> bool:
     """
     Envía un email al empleador; si attachment_url está, lo incluye en el cuerpo.
@@ -74,6 +99,7 @@ def send_proposal_email(employer_email: str, subject: str, body: str, attachment
         logger.error(f"Error al enviar email: {e}")
         return False
 
+
 def send_whatsapp_message(phone: str, message: str) -> bool:
     """
     Placeholder para WhatsApp (p. ej. Baileys).
@@ -85,6 +111,10 @@ def send_whatsapp_message(phone: str, message: str) -> bool:
         logger.error(f"Error al enviar WhatsApp: {e}")
         return False
 
+
+# --------------------------------------------------
+# Background task para propuestas automáticas
+# --------------------------------------------------
 def process_auto_proposal(proposal_id: int):
     """
     Tras 5 minutos, si sigue en 'waiting', la marca 'sent' y manda email/WhatsApp.
@@ -95,12 +125,13 @@ def process_auto_proposal(proposal_id: int):
     conn = get_db_connection()
     cur  = conn.cursor()
     try:
-        # 1) chequea estado
+        # 1) chequeo de estado
         cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id = %s", (proposal_id,))
         row = cur.fetchone()
         if not row:
             logger.error(f"No existe propuesta {proposal_id}")
             return
+
         status, job_id, applicant_id = row
         if status != "waiting":
             logger.info(f"Propuesta {proposal_id} ya no está en 'waiting'")
@@ -118,7 +149,7 @@ def process_auto_proposal(proposal_id: int):
         cur.execute('SELECT name, email, phone FROM "User" WHERE id = %s', (employer_id,))
         employer_name, employer_email, employer_phone = cur.fetchone()
 
-        # 5) preparar y enviar email
+        # 5) enviar email
         subject = f"Nueva propuesta para tu oferta: {job_title}"
         body = (
             f"Hola {employer_name},\n\n"
@@ -131,7 +162,7 @@ def process_auto_proposal(proposal_id: int):
             logger.error(f"Fallo al enviar email para propuesta {proposal_id}")
             return
 
-        # 6) WhatsApp si tiene teléfono
+        # 6) enviar WhatsApp si tiene teléfono
         if employer_phone:
             send_whatsapp_message(
                 employer_phone,
@@ -145,11 +176,17 @@ def process_auto_proposal(proposal_id: int):
         )
         conn.commit()
         logger.info(f"Propuesta {proposal_id} marcada como 'sent'")
+
     except Exception as e:
         logger.error(f"Error en process_auto_proposal: {e}")
     finally:
         cur.close()
         conn.close()
+
+
+# --------------------------------------------------
+# Endpoints
+# --------------------------------------------------
 
 @router.post("/create", dependencies=[Depends(get_current_admin)])
 def create_proposal(payload: dict, background_tasks: BackgroundTasks):
@@ -183,12 +220,14 @@ def create_proposal(payload: dict, background_tasks: BackgroundTasks):
             background_tasks.add_task(process_auto_proposal, proposal_id)
 
         return {"message": "Propuesta creada", "proposal_id": proposal_id}
+
     except Exception as e:
         logger.error(f"Error al crear propuesta: {e}")
         raise HTTPException(status_code=500, detail="Error interno")
     finally:
         cur.close()
         conn.close()
+
 
 @router.patch("/{proposal_id}/send", dependencies=[Depends(get_current_admin)])
 def send_manual_proposal(proposal_id: int):
@@ -206,7 +245,7 @@ def send_manual_proposal(proposal_id: int):
         if status != "pending":
             raise HTTPException(status_code=400, detail="No está en status 'pending'")
 
-        # Reutilizamos la misma lógica de envío que en automático (sin sleep)
+        # Reutilizamos lógica de envio
         cur.execute('SELECT title, "userId" FROM "Job" WHERE id = %s', (job_id,))
         job_title, employer_id = cur.fetchone()
 
@@ -234,6 +273,7 @@ def send_manual_proposal(proposal_id: int):
         )
         conn.commit()
         return {"message": "Propuesta enviada correctamente"}
+
     except HTTPException:
         raise
     except Exception as e:
@@ -243,7 +283,8 @@ def send_manual_proposal(proposal_id: int):
         cur.close()
         conn.close()
 
-@router.get("/", dependencies=[Depends(get_current_admin)])
+
+@router.get("/")
 def list_proposals():
     """
     Lista todas las propuestas ordenadas por fecha de creación.
@@ -274,6 +315,7 @@ def list_proposals():
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
         return {"proposals": [dict(zip(cols, r)) for r in rows]}
+
     except Exception as e:
         logger.error(f"Error al listar propuestas: {e}")
         raise HTTPException(status_code=500, detail="Error interno")
