@@ -33,10 +33,9 @@ from app.routers import (
 from app.routers.matchings_admin import router as matchings_admin_router
 
 # --------------------------------------------------
-# Cargar .env
+# Cargar variables de entorno
 # --------------------------------------------------
 load_dotenv()
-
 SECRET_KEY = os.getenv(
     "SECRET_KEY",
     "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12"
@@ -156,7 +155,6 @@ app.include_router(
 # --------------------------------------------------
 app.include_router(
     matchings_admin_router,
-    tags=["matchings"],
 )
 
 # --------------------------------------------------
