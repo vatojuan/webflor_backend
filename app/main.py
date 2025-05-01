@@ -22,7 +22,15 @@ from app.routers import (
 # Auth Admin
 from backend.auth import router as admin_router
 # Routers de administración
-from app.routers import cv_admin_upload, job, job_admin, admin_users, proposal
+from app.routers import (
+    cv_admin_upload,
+    job,
+    job_admin,
+    admin_users,
+    proposal,
+)
+# Router de matchings
+from app.routers.matchings_admin import router as matchings_admin_router
 
 # --------------------------------------------------
 # Cargar .env
@@ -138,10 +146,17 @@ app.include_router(
     tags=["admin_users"],
 )
 
-# El router de proposals ya define prefix="/api/proposals"
 app.include_router(
     proposal.router,
     tags=["proposals"],
+)
+
+# --------------------------------------------------
+# Router de matchings
+# --------------------------------------------------
+app.include_router(
+    matchings_admin_router,
+    tags=["matchings"],
 )
 
 # --------------------------------------------------
