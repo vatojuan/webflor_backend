@@ -48,7 +48,7 @@ def get_db_connection():
             user=os.getenv("USER"),
             password=os.getenv("PASSWORD"),
             host=os.getenv("HOST", "localhost"),
-            port=int(os.getenv("PORT", "5432")),
+            port=5432,
             sslmode="require"
         )
     except Exception as e:
