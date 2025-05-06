@@ -1,5 +1,3 @@
-# main.py
-
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, status, Request
@@ -19,7 +17,7 @@ from app.routers import (
     users,
     webhooks,
 )
-# Auth Admin
+# Auth Admin (login)
 from backend.auth import router as admin_router
 # Routers de administración
 from app.routers import (
@@ -31,6 +29,8 @@ from app.routers import (
 )
 # Router de matchings
 from app.routers.matchings_admin import router as matchings_admin_router
+# Router de configuración
+from app.routers.admin_config import router as admin_config_router
 
 # --------------------------------------------------
 # Cargar variables de entorno
@@ -155,6 +155,19 @@ app.include_router(
 # --------------------------------------------------
 app.include_router(
     matchings_admin_router,
+    prefix="/api/admin",
+    tags=["matchings"],
+    dependencies=[Depends(get_current_admin)],
+)
+
+# --------------------------------------------------
+# Router de configuración
+# --------------------------------------------------
+app.include_router(
+    admin_config_router,
+    prefix="/api/admin/config",
+    tags=["admin_config"],
+    dependencies=[Depends(get_current_admin)],
 )
 
 # --------------------------------------------------
