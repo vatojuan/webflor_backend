@@ -38,7 +38,7 @@ router = APIRouter(
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
 # --------------------------------------------------
-# Dependencia para endpoints protegidos
+# Dependencia para endpoints protegidos (admin)
 # --------------------------------------------------
 def get_current_admin(token: str = Depends(oauth2_scheme)):
     if not token:
@@ -62,7 +62,7 @@ def get_db_connection():
     return engine.raw_connection()
 
 # --------------------------------------------------
-# Envío de emails y WhatsApp
+# Funciones de envío (email / WhatsApp)
 # --------------------------------------------------
 def send_proposal_email(employer_email: str, subject: str, body: str, attachment_url: str = None) -> bool:
     try:
@@ -96,7 +96,6 @@ def send_proposal_email(employer_email: str, subject: str, body: str, attachment
 def send_whatsapp_message(phone: str, message: str) -> bool:
     try:
         logger.info(f"Enviando WhatsApp a {phone}: {message}")
-        # Integrar con API real si se desea
         return True
     except Exception as e:
         logger.error(f"Error al enviar WhatsApp: {e}")
@@ -112,7 +111,6 @@ def process_auto_proposal(proposal_id: int):
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # Verificar estado
         cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id = %s", (proposal_id,))
         row = cur.fetchone()
         if not row:
@@ -123,7 +121,6 @@ def process_auto_proposal(proposal_id: int):
             logger.info(f"Propuesta {proposal_id} ya no está en 'waiting'")
             return
 
-        # Obtener datos de oferta, postulante y empleador
         cur.execute('SELECT title, "userId" FROM "Job" WHERE id = %s', (job_id,))
         job_title, employer_id = cur.fetchone()
         cur.execute('SELECT name, email, "cvUrl" FROM "User" WHERE id = %s', (applicant_id,))
@@ -131,7 +128,6 @@ def process_auto_proposal(proposal_id: int):
         cur.execute('SELECT name, email, phone FROM "User" WHERE id = %s', (employer_id,))
         employer_name, employer_email, employer_phone = cur.fetchone()
 
-        # Enviar notificaciones
         subject = f"Nueva propuesta para tu oferta: {job_title}"
         body = (
             f"Hola {employer_name},\n\n"
@@ -140,15 +136,10 @@ def process_auto_proposal(proposal_id: int):
             f"Revisa el CV aquí: {cv_url}\n\n"
             "Saludos,\nEquipo FAP Mendoza"
         )
-        if not send_proposal_email(employer_email, subject, body, attachment_url=cv_url):
-            logger.error(f"Fallo al enviar email para propuesta {proposal_id}")
+        send_proposal_email(employer_email, subject, body, attachment_url=cv_url)
         if employer_phone:
-            send_whatsapp_message(
-                employer_phone,
-                f"Hola {employer_name}, tenés una nueva propuesta para '{job_title}'."
-            )
+            send_whatsapp_message(employer_phone, f"Hola {employer_name}, tenés una nueva propuesta para '{job_title}'.")
 
-        # Actualizar estado
         cur.execute(
             "UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s",
             (proposal_id,)
@@ -168,23 +159,18 @@ def process_auto_proposal(proposal_id: int):
 @router.post("/create")
 def create_proposal(payload: dict, background_tasks: BackgroundTasks):
     """
-    Crea una propuesta. JSON con:
-      - job_id
-      - applicant_id
-      - label: 'automatic' | 'manual'
-    Evita duplicados para proposals automáticas.
+    Crea una propuesta automática o manual. Evita duplicados automáticos.
     """
-    job_id = payload.get("job_id")
+    job_id       = payload.get("job_id")
     applicant_id = payload.get("applicant_id")
-    label = payload.get("label")
+    label        = payload.get("label")
     if not job_id or not applicant_id or not label:
         raise HTTPException(status_code=400, detail="Faltan campos obligatorios")
 
     status = "waiting" if label == "automatic" else "pending"
     conn = get_db_connection()
-    cur = conn.cursor()
+    cur  = conn.cursor()
     try:
-        # Insert sólo si no existe ya una automática para este par
         cur.execute(
             """
             INSERT INTO proposals (job_id, applicant_id, label, status)
@@ -216,10 +202,88 @@ def create_proposal(payload: dict, background_tasks: BackgroundTasks):
 
 @router.patch("/{proposal_id}/send", dependencies=[Depends(get_current_admin)])
 def send_manual_proposal(proposal_id: int):
-    # ... el resto permanece igual ...
-    pass
+    """
+    Envía inmediatamente una propuesta manual (status 'pending').
+    """
+    conn = get_db_connection()
+    cur  = conn.cursor()
+    try:
+        cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id = %s", (proposal_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Propuesta no encontrada")
+        status, job_id, applicant_id = row
+        if status != "pending":
+            raise HTTPException(status_code=400, detail="No está en status 'pending'")
+
+        cur.execute('SELECT title, "userId" FROM "Job" WHERE id = %s', (job_id,))
+        job_title, employer_id = cur.fetchone()
+        cur.execute('SELECT name, email, "cvUrl" FROM "User" WHERE id = %s', (applicant_id,))
+        applicant_name, applicant_email, cv_url = cur.fetchone()
+        cur.execute('SELECT name, email, phone FROM "User" WHERE id = %s', (employer_id,))
+        employer_name, employer_email, employer_phone = cur.fetchone()
+
+        subject = f"Nueva propuesta para tu oferta: {job_title}"
+        body = (
+            f"Hola {employer_name},\n\n"
+            f"El postulante {applicant_name} ha aplicado a tu oferta '{job_title}'.\n"
+            f"Contactalo en: {applicant_email}.\n"
+            f"Revisa el CV aquí: {cv_url}\n\n"
+            "Saludos,\nEquipo FAP Mendoza"
+        )
+        send_proposal_email(employer_email, subject, body, attachment_url=cv_url)
+        if employer_phone:
+            send_whatsapp_message(employer_phone, f"Hola {employer_name}, tenés una nueva propuesta para '{job_title}'.")
+
+        cur.execute(
+            "UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s",
+            (proposal_id,)
+        )
+        conn.commit()
+        return {"message": "Propuesta enviada correctamente"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al enviar manual: {e}")
+        raise HTTPException(status_code=500, detail="Error interno")
+    finally:
+        cur.close()
+        conn.close()
 
 @router.get("/", dependencies=[Depends(get_current_admin)])
 def list_proposals():
-    # ... el resto permanece igual ...
-    pass
+    """
+    Lista todas las propuestas ordenadas por fecha.
+    """
+    conn = get_db_connection()
+    cur  = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT
+              p.id,
+              p.label,
+              p.status,
+              p.created_at,
+              p.sent_at,
+              p.notes,
+              j.id       AS job_id,
+              j.title    AS job_title,
+              j.label    AS job_label,
+              j.source   AS job_source,
+              p.applicant_id,
+              ua.name    AS applicant_name,
+              ua.email   AS applicant_email
+            FROM proposals p
+            JOIN "Job"  j  ON p.job_id      = j.id
+            JOIN "User" ua ON p.applicant_id = ua.id
+            ORDER BY p.created_at DESC;
+        """)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        return {"proposals": [dict(zip(cols, r)) for r in rows]}
+    except Exception as e:
+        logger.error(f"Error al listar propuestas: {e}")
+        raise HTTPException(status_code=500, detail="Error interno")
+    finally:
+        cur.close()
+        conn.close()
