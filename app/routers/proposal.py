@@ -96,6 +96,7 @@ def send_proposal_email(employer_email: str, subject: str, body: str, attachment
 def send_whatsapp_message(phone: str, message: str) -> bool:
     try:
         logger.info(f"Enviando WhatsApp a {phone}: {message}")
+        # Placeholder para integración real
         return True
     except Exception as e:
         logger.error(f"Error al enviar WhatsApp: {e}")
@@ -140,10 +141,7 @@ def process_auto_proposal(proposal_id: int):
         if employer_phone:
             send_whatsapp_message(employer_phone, f"Hola {employer_name}, tenés una nueva propuesta para '{job_title}'.")
 
-        cur.execute(
-            "UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s",
-            (proposal_id,)
-        )
+        cur.execute("UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s", (proposal_id,))
         conn.commit()
         logger.info(f"Propuesta {proposal_id} marcada como 'sent'")
     except Exception as e:
@@ -159,17 +157,17 @@ def process_auto_proposal(proposal_id: int):
 @router.post("/create")
 def create_proposal(payload: dict, background_tasks: BackgroundTasks):
     """
-    Crea una propuesta automática o manual. Evita duplicados automáticos.
+    Crea una propuesta automática o manual. Evita duplicados.
     """
-    job_id       = payload.get("job_id")
+    job_id = payload.get("job_id")
     applicant_id = payload.get("applicant_id")
-    label        = payload.get("label")
+    label = payload.get("label")
     if not job_id or not applicant_id or not label:
         raise HTTPException(status_code=400, detail="Faltan campos obligatorios")
 
     status = "waiting" if label == "automatic" else "pending"
     conn = get_db_connection()
-    cur  = conn.cursor()
+    cur = conn.cursor()
     try:
         cur.execute(
             """
@@ -177,7 +175,7 @@ def create_proposal(payload: dict, background_tasks: BackgroundTasks):
             SELECT %s, %s, %s, %s
             WHERE NOT EXISTS (
               SELECT 1 FROM proposals
-              WHERE job_id = %s AND applicant_id = %s AND label = 'automatic'
+              WHERE job_id = %s AND applicant_id = %s
             )
             RETURNING id
             """,
@@ -186,7 +184,7 @@ def create_proposal(payload: dict, background_tasks: BackgroundTasks):
         result = cur.fetchone()
         conn.commit()
         if not result:
-            return {"message": "Ya existe una propuesta automática para este usuario y oferta"}
+            return {"message": "Ya existe una propuesta para este usuario y oferta"}
         proposal_id = result[0]
         logger.info(f"Propuesta {proposal_id} creada con status '{status}'")
         if label == "automatic":
@@ -206,7 +204,7 @@ def send_manual_proposal(proposal_id: int):
     Envía inmediatamente una propuesta manual (status 'pending').
     """
     conn = get_db_connection()
-    cur  = conn.cursor()
+    cur = conn.cursor()
     try:
         cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id = %s", (proposal_id,))
         row = cur.fetchone()
@@ -235,10 +233,7 @@ def send_manual_proposal(proposal_id: int):
         if employer_phone:
             send_whatsapp_message(employer_phone, f"Hola {employer_name}, tenés una nueva propuesta para '{job_title}'.")
 
-        cur.execute(
-            "UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s",
-            (proposal_id,)
-        )
+        cur.execute("UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s", (proposal_id,))
         conn.commit()
         return {"message": "Propuesta enviada correctamente"}
     except HTTPException:
@@ -256,9 +251,10 @@ def list_proposals():
     Lista todas las propuestas ordenadas por fecha.
     """
     conn = get_db_connection()
-    cur  = conn.cursor()
+    cur = conn.cursor()
     try:
-        cur.execute("""
+        cur.execute(
+            """
             SELECT
               p.id,
               p.label,
@@ -269,15 +265,16 @@ def list_proposals():
               j.id       AS job_id,
               j.title    AS job_title,
               j.label    AS job_label,
-              j.source   AS job_source,
+              j.source   AS proposal_source,
               p.applicant_id,
               ua.name    AS applicant_name,
               ua.email   AS applicant_email
             FROM proposals p
             JOIN "Job"  j  ON p.job_id      = j.id
             JOIN "User" ua ON p.applicant_id = ua.id
-            ORDER BY p.created_at DESC;
-        """)
+            ORDER BY p.created_at DESC
+            """
+        )
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
         return {"proposals": [dict(zip(cols, r)) for r in rows]}
