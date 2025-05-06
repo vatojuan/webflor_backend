@@ -1,3 +1,4 @@
+# app/routers/job_admin.py
 from fastapi import APIRouter, HTTPException, Request
 from datetime import datetime
 import os
@@ -5,42 +6,41 @@ import psycopg2
 import traceback
 from dotenv import load_dotenv
 
-# Importar la nueva interfaz de OpenAI
-from openai import OpenAI
-
 load_dotenv()
 
-# Crear el cliente de OpenAI
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+router = APIRouter(prefix="/api/job", tags=["job_admin"])
 
-router = APIRouter()
-
+# --------------------------------------
+# Helper: conexión DB
+# --------------------------------------
 def get_db_connection():
     try:
-        conn = psycopg2.connect(
+        return psycopg2.connect(
             dbname=os.getenv("DBNAME", "postgres"),
             user=os.getenv("USER"),
             password=os.getenv("PASSWORD"),
-            host=os.getenv("HOST"),
-            port=5432,
+            host=os.getenv("HOST", "localhost"),
+            port=int(os.getenv("DB_PORT", "5432")),
             sslmode="require"
         )
-        return conn
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en la conexión a la base de datos: {e}")
 
 @router.get("/admin_offers")
 async def get_admin_offers():
     """
-    Devuelve todas las ofertas de la tabla Job.
+    Devuelve todas las ofertas de la tabla jobs.
     """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("""
-            SELECT id, title, description, requirements, "expirationDate", "userId"
-            FROM "Job"
-        """)
+        cur.execute(
+            """
+            SELECT id, title, description, requirements, expirationDate, userId
+            FROM jobs
+            ORDER BY id DESC
+            """
+        )
         rows = cur.fetchall()
         offers = []
         for row in rows:
@@ -56,21 +56,16 @@ async def get_admin_offers():
         conn.close()
         return {"offers": offers}
     except Exception as e:
-        print(f"Error al obtener ofertas: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error al obtener las ofertas: {e}")
 
 @router.put("/update-admin")
 async def update_admin_offer(request: Request):
     """
-    Actualiza una oferta de la tabla Job: se actualizan título, descripción, requisitos y fecha de expiración,
-    y se recalcula el embedding concatenando estos campos.
-    Nota: El campo userId se conserva sin modificar.
+    Actualiza una oferta de la tabla jobs y recalcula embeddings.
     """
     try:
         data = await request.json()
-        print("📥 Datos recibidos:", data)
-
-        # Obtener y convertir campos necesarios
         job_id = data.get("id")
         title = data.get("title")
         description = data.get("description")
@@ -82,89 +77,83 @@ async def update_admin_offer(request: Request):
             raise HTTPException(status_code=400, detail="Faltan campos obligatorios")
 
         try:
-            job_id_int = int(job_id)
-            userId_int = int(userId)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Error al convertir job_id o userId a entero: {e}")
+            job_id = int(job_id)
+            userId = int(userId)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="jobId o userId inválido")
 
-        # Convertir expirationDate (se asume formato 'YYYY-MM-DD')
         exp_date = None
         if expirationDate:
             try:
                 exp_date = datetime.fromisoformat(expirationDate)
-            except Exception as e:
-                print("❌ Error al convertir fecha:", expirationDate, e)
+            except ValueError:
                 raise HTTPException(status_code=400, detail="Formato de fecha inválido. Use 'YYYY-MM-DD'")
 
-        # Recalcular el embedding usando la nueva interfaz de OpenAI
+        # Recalcular embedding
         text_to_embed = f"{title} {description} {requirements or ''}"
-        print("🔠 Texto para embedding:", text_to_embed)
-
-        response = client.embeddings.create(
+        from openai import OpenAI
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        resp = client.embeddings.create(
             input=text_to_embed,
             model="text-embedding-ada-002"
         )
-        embedding = response.data[0].embedding
-        print("✅ Embedding generado")
+        embedding = resp.data[0].embedding
 
-        # Ejecutar la actualización en la base de datos
         conn = get_db_connection()
         cur = conn.cursor()
-        update_query = """
-            UPDATE "Job"
+        cur.execute(
+            """
+            UPDATE jobs
             SET title = %s,
                 description = %s,
                 requirements = %s,
-                "expirationDate" = %s,
-                "userId" = %s,
+                expirationDate = %s,
+                userId = %s,
                 embedding = %s
             WHERE id = %s
-            RETURNING id, title, description, requirements, "expirationDate", "userId";
-        """
-        print("🚀 Ejecutando UPDATE en la BD...")
-        cur.execute(update_query, (
-            title,
-            description,
-            requirements,
-            exp_date,
-            userId_int,
-            embedding,
-            job_id_int
-        ))
-        updated_row = cur.fetchone()
-        if not updated_row:
+            RETURNING id, title, description, requirements, expirationDate, userId
+            """,
+            (title, description, requirements, exp_date, userId, embedding, job_id)
+        )
+        updated = cur.fetchone()
+        if not updated:
             raise HTTPException(status_code=404, detail="Oferta no encontrada")
         conn.commit()
         cur.close()
         conn.close()
-        print("✅ Oferta actualizada:", updated_row)
 
         return {
-            "id": updated_row[0],
-            "title": updated_row[1],
-            "description": updated_row[2],
-            "requirements": updated_row[3],
-            "expirationDate": updated_row[4].isoformat() if updated_row[4] else None,
-            "userId": updated_row[5]
+            "id": updated[0],
+            "title": updated[1],
+            "description": updated[2],
+            "requirements": updated[3],
+            "expirationDate": updated[4].isoformat() if updated[4] else None,
+            "userId": updated[5]
         }
-    except Exception:
-        print("❌ Error en update-admin:")
-        print(traceback.format_exc())
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @router.delete("/delete-admin")
 async def delete_admin_offer(request: Request):
     """
-    Elimina una oferta de la tabla Job según el jobId enviado.
+    Elimina una oferta de la tabla jobs según jobId enviado en JSON.
     """
     try:
         data = await request.json()
         job_id = data.get("jobId")
         if not job_id:
-            raise HTTPException(status_code=400, detail="JobId es requerido")
+            raise HTTPException(status_code=400, detail="jobId es requerido")
+        job_id = int(job_id)
+
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute('DELETE FROM "Job" WHERE id = %s RETURNING id', (job_id,))
+        cur.execute(
+            "DELETE FROM jobs WHERE id = %s RETURNING id",
+            (job_id,)
+        )
         deleted = cur.fetchone()
         if not deleted:
             raise HTTPException(status_code=404, detail="Oferta no encontrada")
@@ -172,5 +161,8 @@ async def delete_admin_offer(request: Request):
         cur.close()
         conn.close()
         return {"message": "Oferta eliminada", "jobId": job_id}
+    except HTTPException:
+        raise
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error eliminando la oferta: {e}")
