@@ -106,7 +106,6 @@ for router in (
 app.include_router(admin_router, prefix="/auth", tags=["admin"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
-
 def get_current_admin(token: str = Depends(oauth2_scheme)):
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Token no proporcionado")
@@ -163,9 +162,9 @@ app.include_router(
 # --------------------------------------------------
 # Router de configuración
 # --------------------------------------------------
+# Ya tiene su propio prefix en admin_config.py, no lo duplicamos aquí
 app.include_router(
     admin_config_router,
-    prefix="/api/admin/config",
     tags=["admin_config"],
     dependencies=[Depends(get_current_admin)],
 )
@@ -177,11 +176,9 @@ app.include_router(
 def admin_protected(user=Depends(get_current_admin)):
     return {"message": f"Bienvenido, {user}"}
 
-
 @app.get("/")
 def home():
     return {"ok": True, "message": "API viva y en HTTPS"}
-
 
 @app.on_event("startup")
 def list_routes():
