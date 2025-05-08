@@ -27,9 +27,9 @@ from app.routers import (
     admin_users,
     proposal,
 )
-# Router de matchings
+# Router de matchings (ya incluye prefix="/api/admin")
 from app.routers.matchings_admin import router as matchings_admin_router
-# Router de configuración
+# Router de configuración (ya incluye prefix="/api/admin/config")
 from app.routers.admin_config import router as admin_config_router
 
 # --------------------------------------------------
@@ -74,9 +74,7 @@ app.add_middleware(
 @app.middleware("http")
 async def log_request(request: Request, call_next):
     print(
-        "📥",
-        request.method,
-        request.url.path,
+        "📥", request.method, request.url.path,
         "proto=", request.headers.get("x-forwarded-proto"),
         "host=", request.headers.get("host"),
     )
@@ -150,19 +148,17 @@ app.include_router(
 )
 
 # --------------------------------------------------
-# Router de matchings
+# Router de matchings (usa su propio prefix)
 # --------------------------------------------------
 app.include_router(
     matchings_admin_router,
-    prefix="/api/admin",
     tags=["matchings"],
     dependencies=[Depends(get_current_admin)],
 )
 
 # --------------------------------------------------
-# Router de configuración
+# Router de configuración (usa su propio prefix)
 # --------------------------------------------------
-# Ya tiene su propio prefix en admin_config.py, no lo duplicamos aquí
 app.include_router(
     admin_config_router,
     tags=["admin_config"],
