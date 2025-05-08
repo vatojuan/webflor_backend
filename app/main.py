@@ -1,6 +1,8 @@
+# main.py
+
 import os
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -27,24 +29,15 @@ from app.routers import (
     admin_users,
     proposal,
 )
-# Router de matchings (ya incluye prefix="/api/admin")
+# Router de matchings
 from app.routers.matchings_admin import router as matchings_admin_router
-# Router de configuración (ya incluye prefix="/api/admin/config")
+# Router de configuración
 from app.routers.admin_config import router as admin_config_router
 
-# --------------------------------------------------
-# Cargar variables de entorno
-# --------------------------------------------------
 load_dotenv()
-SECRET_KEY = os.getenv(
-    "SECRET_KEY",
-    "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12"
-)
-ALGORITHM = os.getenv("ALGORITHM", "HS256")
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM  = os.getenv("ALGORITHM", "HS256")
 
-# --------------------------------------------------
-# Inicializar FastAPI
-# --------------------------------------------------
 app = FastAPI(
     proxy_headers=True,
     redirect_slashes=False,
@@ -53,13 +46,10 @@ app = FastAPI(
     root_path="/",
 )
 
-# --------------------------------------------------
-# Configuración CORS
-# --------------------------------------------------
+# CORS
 origins = os.getenv("FRONTEND_ORIGINS", "").split(",")
 if not origins or origins == [""]:
     origins = ["*"]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -68,24 +58,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------------------------------------------------
-# Middleware de logging
-# --------------------------------------------------
+# Logging middleware
 @app.middleware("http")
 async def log_request(request: Request, call_next):
-    print(
-        "📥", request.method, request.url.path,
-        "proto=", request.headers.get("x-forwarded-proto"),
-        "host=", request.headers.get("host"),
-    )
-    response = await call_next(request)
-    print("📤", response.status_code)
-    return response
+    print("📥", request.method, request.url.path,
+          "proto=", request.headers.get("x-forwarded-proto"),
+          "host=", request.headers.get("host"))
+    resp = await call_next(request)
+    print("📤", resp.status_code)
+    return resp
 
-# --------------------------------------------------
 # Routers públicos
-# --------------------------------------------------
-for router in (
+for r in (
     public_auth.router,
     cv_confirm.router,
     cv_upload.router,
@@ -96,41 +80,39 @@ for router in (
     users.router,
     webhooks.router,
 ):
-    app.include_router(router)
+    app.include_router(r)
 
-# --------------------------------------------------
-# Auth Admin (login)
-# --------------------------------------------------
+# Auth admin-login
 app.include_router(admin_router, prefix="/auth", tags=["admin"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
 def get_current_admin(token: str = Depends(oauth2_scheme)):
     if not token:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Token no proporcionado")
+        raise HTTPException(401, "Token no proporcionado")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         sub = payload.get("sub")
         if not sub:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado")
+            raise HTTPException(401, "Token inválido o expirado")
     except JWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado")
+        raise HTTPException(401, "Token inválido o expirado")
     return sub
 
-# --------------------------------------------------
-# Routers protegidos (admin)
-# --------------------------------------------------
+# Routers protegidos
 app.include_router(
     cv_admin_upload.router,
     tags=["cv_admin"],
     dependencies=[Depends(get_current_admin)],
 )
 
+# job.router NO tiene prefix interno → lo ponemos aquí
 app.include_router(
     job.router,
     prefix="/api/job",
     tags=["job"],
 )
 
+# job_admin.router YA incluye prefix="/api/job" internamente → sin volver a ponerlo
 app.include_router(
     job_admin.router,
     tags=["job_admin"],
@@ -146,27 +128,21 @@ app.include_router(
     tags=["proposals"],
 )
 
-# --------------------------------------------------
-# Router de matchings (usa su propio prefix)
-# --------------------------------------------------
+# matchings_admin_router ya define prefix="/api/admin" internamente
 app.include_router(
     matchings_admin_router,
     tags=["matchings"],
     dependencies=[Depends(get_current_admin)],
 )
 
-# --------------------------------------------------
-# Router de configuración (usa su propio prefix)
-# --------------------------------------------------
+# admin_config_router ya define prefix="/api/admin/config" internamente
 app.include_router(
     admin_config_router,
     tags=["admin_config"],
     dependencies=[Depends(get_current_admin)],
 )
 
-# --------------------------------------------------
-# Endpoints adicionales
-# --------------------------------------------------
+# endpoints adicionales
 @app.get("/admin/protected", tags=["admin"])
 def admin_protected(user=Depends(get_current_admin)):
     return {"message": f"Bienvenido, {user}"}

@@ -1,19 +1,20 @@
+# app/routers/admin_config.py
+
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import OAuth2PasswordBearer
 import os
 import psycopg2
 from dotenv import load_dotenv
+from jose import JWTError, jwt
 
 load_dotenv()
 
 router = APIRouter(prefix="/api/admin/config", tags=["admin_config"])
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
-
-# JWT admin validation
-from jose import JWTError, jwt
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM  = os.getenv("ALGORITHM", "HS256")
+
 
 def get_current_admin(token: str = Depends(oauth2_scheme)):
     if not token:
@@ -27,7 +28,6 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido o expirado")
 
-# DB connection helper
 
 def get_db_connection():
     try:
@@ -42,6 +42,9 @@ def get_db_connection():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DB connection error: {e}")
 
+
+# GET con y sin slash final
+@router.get("", dependencies=[Depends(get_current_admin)])
 @router.get("/", dependencies=[Depends(get_current_admin)])
 def get_config():
     conn = get_db_connection()
@@ -56,6 +59,8 @@ def get_config():
         cur.close()
         conn.close()
 
+
+@router.post("", dependencies=[Depends(get_current_admin)])
 @router.post("/", dependencies=[Depends(get_current_admin)])
 async def update_config(request: Request):
     payload = await request.json()
