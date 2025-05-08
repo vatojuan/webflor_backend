@@ -133,7 +133,6 @@ app.include_router(
 
 app.include_router(
     job_admin.router,
-    prefix="/api/job",
     tags=["job_admin"],
 )
 
