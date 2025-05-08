@@ -1,127 +1,142 @@
 # app/routers/job_admin.py
-from fastapi import APIRouter, HTTPException, Request
-from datetime import datetime
+
 import os
-import psycopg2
 import traceback
+from datetime import datetime
+
+from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi.security import OAuth2PasswordBearer
+import psycopg2
 from dotenv import load_dotenv
+from jose import JWTError, jwt
 
 load_dotenv()
 
-router = APIRouter(prefix="/api/job", tags=["job_admin"])
+# Configuración JWT
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM  = os.getenv("ALGORITHM", "HS256")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
-# --------------------------------------
-# Helper: conexión DB
-# --------------------------------------
+def get_current_admin(token: str = Depends(oauth2_scheme)):
+    if not token:
+        raise HTTPException(status_code=401, detail="Token no proporcionado")
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        sub = payload.get("sub")
+        if not sub:
+            raise HTTPException(status_code=401, detail="Token inválido o expirado")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token inválido o expirado")
+    return sub
+
+# Helper: conexión a la base de datos
 def get_db_connection():
     try:
         return psycopg2.connect(
-            dbname=os.getenv("DBNAME", "postgres"),
+            dbname=os.getenv("DBNAME"),
             user=os.getenv("USER"),
             password=os.getenv("PASSWORD"),
-            host=os.getenv("HOST", "localhost"),
-            port=int(os.getenv("DB_PORT", "5432")),
+            host=os.getenv("HOST"),
+            port=int(os.getenv("DB_PORT", 5432)),
             sslmode="require"
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en la conexión a la base de datos: {e}")
 
+# Router con prefix y autenticación aplicada globalmente
+router = APIRouter(
+    prefix="/api/job",
+    tags=["job_admin"],
+    dependencies=[Depends(get_current_admin)],
+)
+
 @router.get("/admin_offers")
 async def get_admin_offers():
     """
-    Devuelve todas las ofertas de la tabla jobs.
+    Devuelve todas las ofertas de la tabla `jobs`.
     """
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, title, description, requirements, expirationDate, userId
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT id,
+                   title,
+                   description,
+                   requirements,
+                   "expirationDate",
+                   "userId"
             FROM jobs
-            ORDER BY id DESC
-            """
-        )
+            ORDER BY id DESC;
+        """)
         rows = cur.fetchall()
         offers = []
-        for row in rows:
+        for id_, title, desc, reqs, exp_date, user_id in rows:
             offers.append({
-                "id": row[0],
-                "title": row[1],
-                "description": row[2],
-                "requirements": row[3],
-                "expirationDate": row[4].isoformat() if row[4] else None,
-                "userId": row[5]
+                "id": id_,
+                "title": title,
+                "description": desc,
+                "requirements": reqs,
+                "expirationDate": exp_date.isoformat() if exp_date else None,
+                "userId": user_id
             })
-        cur.close()
-        conn.close()
         return {"offers": offers}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error al obtener las ofertas: {e}")
+    finally:
+        cur.close()
+        conn.close()
 
 @router.put("/update-admin")
 async def update_admin_offer(request: Request):
     """
-    Actualiza una oferta de la tabla jobs y recalcula embeddings.
+    Actualiza una oferta de la tabla `jobs` y recalcula embedding.
     """
     try:
         data = await request.json()
-        job_id = data.get("id")
-        title = data.get("title")
+        job_id      = int(data.get("id") or 0)
+        title       = data.get("title")
         description = data.get("description")
-        requirements = data.get("requirements")
-        expirationDate = data.get("expirationDate")
-        userId = data.get("userId")
+        requirements= data.get("requirements", "")
+        expiration  = data.get("expirationDate")
+        user_id     = int(data.get("userId") or 0)
 
-        if not job_id or not title or not description or not userId:
+        if not job_id or not title or not description or not user_id:
             raise HTTPException(status_code=400, detail="Faltan campos obligatorios")
 
-        try:
-            job_id = int(job_id)
-            userId = int(userId)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="jobId o userId inválido")
-
         exp_date = None
-        if expirationDate:
+        if expiration:
             try:
-                exp_date = datetime.fromisoformat(expirationDate)
+                exp_date = datetime.fromisoformat(expiration)
             except ValueError:
                 raise HTTPException(status_code=400, detail="Formato de fecha inválido. Use 'YYYY-MM-DD'")
 
         # Recalcular embedding
-        text_to_embed = f"{title} {description} {requirements or ''}"
         from openai import OpenAI
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        resp = client.embeddings.create(
-            input=text_to_embed,
-            model="text-embedding-ada-002"
-        )
+        text_to_embed = f"{title} {description} {requirements}"
+        resp = client.embeddings.create(input=text_to_embed, model="text-embedding-ada-002")
         embedding = resp.data[0].embedding
 
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            """
+        cur  = conn.cursor()
+        cur.execute("""
             UPDATE jobs
-            SET title = %s,
-                description = %s,
-                requirements = %s,
-                expirationDate = %s,
-                userId = %s,
-                embedding = %s
+            SET title            = %s,
+                description      = %s,
+                requirements     = %s,
+                "expirationDate" = %s,
+                "userId"         = %s,
+                embedding        = %s
             WHERE id = %s
-            RETURNING id, title, description, requirements, expirationDate, userId
-            """,
-            (title, description, requirements, exp_date, userId, embedding, job_id)
-        )
+            RETURNING id, title, description, requirements, "expirationDate", "userId";
+        """, (title, description, requirements, exp_date, user_id, embedding, job_id))
+
         updated = cur.fetchone()
         if not updated:
             raise HTTPException(status_code=404, detail="Oferta no encontrada")
-        conn.commit()
-        cur.close()
-        conn.close()
 
+        conn.commit()
         return {
             "id": updated[0],
             "title": updated[1],
@@ -132,37 +147,38 @@ async def update_admin_offer(request: Request):
         }
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+    finally:
+        cur.close()
+        conn.close()
 
 @router.delete("/delete-admin")
 async def delete_admin_offer(request: Request):
     """
-    Elimina una oferta de la tabla jobs según jobId enviado en JSON.
+    Elimina una oferta de la tabla `jobs` según `jobId` enviado en JSON.
     """
     try:
-        data = await request.json()
-        job_id = data.get("jobId")
+        data   = await request.json()
+        job_id = int(data.get("jobId") or 0)
         if not job_id:
             raise HTTPException(status_code=400, detail="jobId es requerido")
-        job_id = int(job_id)
 
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "DELETE FROM jobs WHERE id = %s RETURNING id",
-            (job_id,)
-        )
+        cur  = conn.cursor()
+        cur.execute("DELETE FROM jobs WHERE id = %s RETURNING id;", (job_id,))
         deleted = cur.fetchone()
         if not deleted:
             raise HTTPException(status_code=404, detail="Oferta no encontrada")
+
         conn.commit()
-        cur.close()
-        conn.close()
         return {"message": "Oferta eliminada", "jobId": job_id}
     except HTTPException:
         raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error eliminando la oferta: {e}")
+    finally:
+        cur.close()
+        conn.close()
