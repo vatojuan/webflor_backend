@@ -6,15 +6,15 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
 import psycopg2
 from dotenv import load_dotenv
-from jose import JWTError, jwt
 
 load_dotenv()
 
-# Configuración JWT
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM  = os.getenv("ALGORITHM", "HS256")
+# — JWT admin —
+SECRET_KEY    = os.getenv("SECRET_KEY")
+ALGORITHM     = os.getenv("ALGORITHM", "HS256")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
 def get_current_admin(token: str = Depends(oauth2_scheme)):
@@ -22,14 +22,13 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=401, detail="Token no proporcionado")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        sub = payload.get("sub")
-        if not sub:
+        if not payload.get("sub"):
             raise HTTPException(status_code=401, detail="Token inválido o expirado")
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido o expirado")
-    return sub
+    return payload["sub"]
 
-# Helper: conexión a la base de datos
+# — DB helper —
 def get_db_connection():
     try:
         return psycopg2.connect(
@@ -41,9 +40,9 @@ def get_db_connection():
             sslmode="require"
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en la conexión a la base de datos: {e}")
+        raise HTTPException(status_code=500, detail=f"Error en la conexión a la BD: {e}")
 
-# Router con prefix y autenticación aplicada globalmente
+# — Router protegido —
 router = APIRouter(
     prefix="/api/job",
     tags=["job_admin"],
@@ -53,36 +52,34 @@ router = APIRouter(
 @router.get("/admin_offers")
 async def get_admin_offers():
     """
-    Devuelve todas las ofertas de la tabla `jobs`.
+    Todas las ofertas de la tabla "Job", con source y label.
     """
+    conn = get_db_connection()
+    cur  = conn.cursor()
     try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
         cur.execute("""
             SELECT id,
                    title,
                    description,
                    requirements,
                    "expirationDate",
-                   "userId"
-            FROM jobs
+                   "userId",
+                   source,
+                   label
+            FROM public."Job"
             ORDER BY id DESC;
         """)
-        rows = cur.fetchall()
+        cols = [c[0] for c in cur.description]
         offers = []
-        for id_, title, desc, reqs, exp_date, user_id in rows:
-            offers.append({
-                "id": id_,
-                "title": title,
-                "description": desc,
-                "requirements": reqs,
-                "expirationDate": exp_date.isoformat() if exp_date else None,
-                "userId": user_id
-            })
+        for row in cur.fetchall():
+            offer = dict(zip(cols, row))
+            if offer["expirationDate"]:
+                offer["expirationDate"] = offer["expirationDate"].isoformat()
+            offers.append(offer)
         return {"offers": offers}
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error al obtener las ofertas: {e}")
+        raise HTTPException(status_code=500, detail=f"Error al obtener ofertas: {e}")
     finally:
         cur.close()
         conn.close()
@@ -90,8 +87,10 @@ async def get_admin_offers():
 @router.put("/update-admin")
 async def update_admin_offer(request: Request):
     """
-    Actualiza una oferta de la tabla `jobs` y recalcula embedding.
+    Actualiza una oferta de "Job" y recalcula embedding.
     """
+    conn = get_db_connection()
+    cur  = conn.cursor()
     try:
         data = await request.json()
         job_id      = int(data.get("id") or 0)
@@ -101,7 +100,7 @@ async def update_admin_offer(request: Request):
         expiration  = data.get("expirationDate")
         user_id     = int(data.get("userId") or 0)
 
-        if not job_id or not title or not description or not user_id:
+        if not (job_id and title and description and user_id):
             raise HTTPException(status_code=400, detail="Faltan campos obligatorios")
 
         exp_date = None
@@ -109,7 +108,7 @@ async def update_admin_offer(request: Request):
             try:
                 exp_date = datetime.fromisoformat(expiration)
             except ValueError:
-                raise HTTPException(status_code=400, detail="Formato de fecha inválido. Use 'YYYY-MM-DD'")
+                raise HTTPException(status_code=400, detail="Formato de fecha inválido")
 
         # Recalcular embedding
         from openai import OpenAI
@@ -118,10 +117,8 @@ async def update_admin_offer(request: Request):
         resp = client.embeddings.create(input=text_to_embed, model="text-embedding-ada-002")
         embedding = resp.data[0].embedding
 
-        conn = get_db_connection()
-        cur  = conn.cursor()
         cur.execute("""
-            UPDATE jobs
+            UPDATE public."Job"
             SET title            = %s,
                 description      = %s,
                 requirements     = %s,
@@ -129,7 +126,7 @@ async def update_admin_offer(request: Request):
                 "userId"         = %s,
                 embedding        = %s
             WHERE id = %s
-            RETURNING id, title, description, requirements, "expirationDate", "userId";
+            RETURNING id, title, description, requirements, "expirationDate", "userId", source, label;
         """, (title, description, requirements, exp_date, user_id, embedding, job_id))
 
         updated = cur.fetchone()
@@ -137,19 +134,19 @@ async def update_admin_offer(request: Request):
             raise HTTPException(status_code=404, detail="Oferta no encontrada")
 
         conn.commit()
-        return {
-            "id": updated[0],
-            "title": updated[1],
-            "description": updated[2],
-            "requirements": updated[3],
-            "expirationDate": updated[4].isoformat() if updated[4] else None,
-            "userId": updated[5]
-        }
+        offer = dict(zip(
+            ["id","title","description","requirements","expirationDate","userId","source","label"],
+            updated
+        ))
+        if offer["expirationDate"]:
+            offer["expirationDate"] = offer["expirationDate"].isoformat()
+        return offer
+
     except HTTPException:
         raise
     except Exception:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        raise HTTPException(status_code=500, detail="Error interno al actualizar")
     finally:
         cur.close()
         conn.close()
@@ -157,28 +154,29 @@ async def update_admin_offer(request: Request):
 @router.delete("/delete-admin")
 async def delete_admin_offer(request: Request):
     """
-    Elimina una oferta de la tabla `jobs` según `jobId` enviado en JSON.
+    Elimina una oferta de "Job" según jobId.
     """
+    conn = get_db_connection()
+    cur  = conn.cursor()
     try:
         data   = await request.json()
         job_id = int(data.get("jobId") or 0)
         if not job_id:
             raise HTTPException(status_code=400, detail="jobId es requerido")
 
-        conn = get_db_connection()
-        cur  = conn.cursor()
-        cur.execute("DELETE FROM jobs WHERE id = %s RETURNING id;", (job_id,))
+        cur.execute('DELETE FROM public."Job" WHERE id = %s RETURNING id;', (job_id,))
         deleted = cur.fetchone()
         if not deleted:
             raise HTTPException(status_code=404, detail="Oferta no encontrada")
 
         conn.commit()
         return {"message": "Oferta eliminada", "jobId": job_id}
+
     except HTTPException:
         raise
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error eliminando la oferta: {e}")
+        raise HTTPException(status_code=500, detail=f"Error al eliminar oferta: {e}")
     finally:
         cur.close()
         conn.close()
