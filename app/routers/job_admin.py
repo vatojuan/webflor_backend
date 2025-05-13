@@ -1,3 +1,5 @@
+# app/routers/job_admin.py
+
 import os
 import traceback
 from datetime import datetime, timezone
@@ -113,8 +115,13 @@ async def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
             exp   = offer["expirationDate"]
-            is_expired = bool(exp and exp < now)
+
+            # Convertir a ISO y comparar como aware UTC
+            is_expired = False
             if exp:
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                is_expired = exp < now
                 offer["expirationDate"] = exp.isoformat()
 
             is_admin_offer = (admin_id is not None and offer["userId"] == admin_id)
