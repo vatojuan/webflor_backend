@@ -42,12 +42,19 @@ def generate_job_embedding(text: str):
 
 @router.post("/create-admin")
 async def create_admin_job(request: Request):
-    payload = await request.json()
-    title       = payload.get("title")
-    description = payload.get("description")
-    requirements= payload.get("requirements")
-    expiration  = payload.get("expirationDate")
-    user_id     = payload.get("userId")
+    payload      = await request.json()
+    title        = payload.get("title")
+    description  = payload.get("description")
+    requirements = payload.get("requirements")
+    expiration   = payload.get("expirationDate")
+    user_id      = payload.get("userId")
+
+    # nuestros nuevos campos:
+    source       = payload.get("source", "admin")
+    label        = payload.get("label", "manual")
+    is_paid      = bool(payload.get("isPaid", False))
+    contact_email= payload.get("contactEmail")
+    contact_phone= payload.get("contactPhone")
 
     # Validaciones básicas
     if not title or not description or not user_id:
@@ -75,15 +82,16 @@ async def create_admin_job(request: Request):
     else:
         print("⚠️ No se generó el embedding, se procederá sin él.")
 
-    # Inserción en BD, ahora con source y label
+    # Inserción en BD, ahora con source, label, is_paid, contact_email, contact_phone
     try:
         conn = get_db_connection()
         cur  = conn.cursor()
         cur.execute("""
             INSERT INTO "Job"
-                (title, description, requirements, "expirationDate", "userId", embedding, source, label)
+                (title, description, requirements, "expirationDate", "userId",
+                 embedding, source, label, "isPaid", "contactEmail", "contactPhone")
             VALUES
-                (%s, %s, %s, %s, %s, %s, %s, %s)
+                (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id;
         """, (
             title,
@@ -92,8 +100,11 @@ async def create_admin_job(request: Request):
             exp_date,
             user_id,
             embedding,
-            "admin",   # source por defecto
-            "manual"   # label por defecto
+            source,
+            label,
+            is_paid,
+            contact_email,
+            contact_phone
         ))
         job_id = cur.fetchone()[0]
         conn.commit()
