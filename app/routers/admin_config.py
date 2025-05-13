@@ -1,89 +1,89 @@
 # app/routers/admin_config.py
 
-from fastapi import APIRouter, HTTPException, Depends, Request
-from fastapi.security import OAuth2PasswordBearer
 import os
+from fastapi import APIRouter, HTTPException, Depends
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
 import psycopg2
 from dotenv import load_dotenv
-from jose import JWTError, jwt
 
 load_dotenv()
 
-router = APIRouter(prefix="/api/admin/config", tags=["admin_config"])
-
+# — JWT admin —
+SECRET_KEY    = os.getenv("SECRET_KEY")
+ALGORITHM     = os.getenv("ALGORITHM", "HS256")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM  = os.getenv("ALGORITHM", "HS256")
-
 
 def get_current_admin(token: str = Depends(oauth2_scheme)):
     if not token:
-        raise HTTPException(status_code=401, detail="Token no proporcionado")
+        raise HTTPException(401, "Token no proporcionado")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        sub = payload.get("sub")
-        if not sub:
-            raise HTTPException(status_code=401, detail="Token inválido o expirado")
-        return sub
+        if not payload.get("sub"):
+            raise HTTPException(401, "Token inválido o expirado")
     except JWTError:
-        raise HTTPException(status_code=401, detail="Token inválido o expirado")
-
+        raise HTTPException(401, "Token inválido o expirado")
+    return payload["sub"]
 
 def get_db_connection():
     try:
         return psycopg2.connect(
-            dbname=os.getenv("DBNAME"),
-            user=os.getenv("USER"),
-            password=os.getenv("PASSWORD"),
-            host=os.getenv("HOST"),
-            port=int(os.getenv("DB_PORT", 5432)),
-            sslmode="require"
+            dbname   = os.getenv("DBNAME"),
+            user     = os.getenv("USER"),
+            password = os.getenv("PASSWORD"),
+            host     = os.getenv("HOST"),
+            port     = int(os.getenv("DB_PORT", 5432)),
+            sslmode  = "require"
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB connection error: {e}")
+        raise HTTPException(500, f"Error en la conexión a la BD: {e}")
 
+router = APIRouter(
+    prefix="/api/admin/config",
+    tags=["admin_config"],
+    dependencies=[Depends(get_current_admin)]
+)
 
-# GET con y sin slash final
-@router.get("", dependencies=[Depends(get_current_admin)])
-@router.get("/", dependencies=[Depends(get_current_admin)])
+@router.get("/")
 def get_config():
     conn = get_db_connection()
     cur  = conn.cursor()
     try:
         cur.execute("SELECT key, value FROM admin_config;")
         rows = cur.fetchall()
-        return { k: v for k, v in rows }
+        return {
+            key: (value.lower() == "true")
+            for key, value in rows
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching config: {e}")
+        raise HTTPException(500, f"Error fetching config: {e}")
     finally:
         cur.close()
         conn.close()
 
-
-@router.post("", dependencies=[Depends(get_current_admin)])
-@router.post("/", dependencies=[Depends(get_current_admin)])
-async def update_config(request: Request):
-    payload = await request.json()
+@router.post("/")
+def update_config(payload: dict):
     settings = payload.get("settings")
     if not isinstance(settings, dict):
-        raise HTTPException(status_code=400, detail="settings debe ser un objeto clave->valor")
+        raise HTTPException(400, "El campo 'settings' debe ser un objeto clave→valor")
     conn = get_db_connection()
     cur  = conn.cursor()
     try:
-        for key, value in settings.items():
+        for key, val in settings.items():
+            str_val = "true" if bool(val) else "false"
             cur.execute(
                 """
-                INSERT INTO admin_config (key, value)
+                INSERT INTO admin_config(key, value)
                 VALUES (%s, %s)
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
                 """,
-                (key, str(value))
+                (key, str_val)
             )
         conn.commit()
         return {"message": "Configuración actualizada"}
     except Exception as e:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error updating config: {e}")
+        raise HTTPException(500, f"Error updating config: {e}")
     finally:
         cur.close()
         conn.close()
