@@ -1,9 +1,6 @@
-# app/routers/job_admin.py
-
 import os
 import traceback
 from datetime import datetime
-
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -13,8 +10,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # — JWT admin —
-SECRET_KEY    = os.getenv("SECRET_KEY")
-ALGORITHM     = os.getenv("ALGORITHM", "HS256")
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
 def get_current_admin(token: str = Depends(oauth2_scheme)):
@@ -42,6 +39,19 @@ def get_db_connection():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en la conexión a la BD: {e}")
 
+def get_admin_config():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT key, value FROM admin_config")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return {k: v.lower() == "true" for k, v in rows}
+    except Exception as e:
+        print("❌ Error leyendo configuración:", e)
+        return {}
+
 # — Router protegido —
 router = APIRouter(
     prefix="/api/job",
@@ -52,31 +62,53 @@ router = APIRouter(
 @router.get("/admin_offers")
 async def get_admin_offers():
     """
-    Todas las ofertas de la tabla "Job", con source y label.
+    Todas las ofertas de la tabla "Job", filtradas según configuración admin_config.
     """
-    conn = get_db_connection()
-    cur  = conn.cursor()
+    config = get_admin_config()
+    show_exp_admin = config.get("show_expired_admin_offers", False)
+    show_exp_employer = config.get("show_expired_employer_offers", False)
+
     try:
-        cur.execute("""
-            SELECT id,
-                   title,
-                   description,
-                   requirements,
-                   "expirationDate",
-                   "userId",
-                   source,
-                   label
-            FROM public."Job"
-            ORDER BY id DESC;
-        """)
-        cols = [c[0] for c in cur.description]
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        base_query = """
+            SELECT j.id,
+                   j.title,
+                   j.description,
+                   j.requirements,
+                   j."expirationDate",
+                   j."userId",
+                   j.source,
+                   j.label,
+                   u.role
+            FROM public."Job" j
+            LEFT JOIN public."User" u ON j."userId" = u.id
+        """
+        conditions = []
+        if not show_exp_admin:
+            conditions.append("""
+                NOT (u.role = 'admin' AND j."expirationDate" IS NOT NULL AND j."expirationDate" < CURRENT_DATE)
+            """)
+        if not show_exp_employer:
+            conditions.append("""
+                NOT (u.role != 'admin' AND j."expirationDate" IS NOT NULL AND j."expirationDate" < CURRENT_DATE)
+            """)
+        if conditions:
+            base_query += " WHERE " + " AND ".join(conditions)
+        base_query += " ORDER BY j.id DESC;"
+
+        cur.execute(base_query)
+        cols = [desc[0] for desc in cur.description]
         offers = []
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
             if offer["expirationDate"]:
                 offer["expirationDate"] = offer["expirationDate"].isoformat()
             offers.append(offer)
+
         return {"offers": offers}
+
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error al obtener ofertas: {e}")
@@ -84,13 +116,11 @@ async def get_admin_offers():
         cur.close()
         conn.close()
 
+# — Actualizar oferta —
 @router.put("/update-admin")
 async def update_admin_offer(request: Request):
-    """
-    Actualiza una oferta de "Job" y recalcula embedding.
-    """
     conn = get_db_connection()
-    cur  = conn.cursor()
+    cur = conn.cursor()
     try:
         data = await request.json()
         job_id      = int(data.get("id") or 0)
@@ -135,7 +165,7 @@ async def update_admin_offer(request: Request):
 
         conn.commit()
         offer = dict(zip(
-            ["id","title","description","requirements","expirationDate","userId","source","label"],
+            ["id", "title", "description", "requirements", "expirationDate", "userId", "source", "label"],
             updated
         ))
         if offer["expirationDate"]:
@@ -151,15 +181,13 @@ async def update_admin_offer(request: Request):
         cur.close()
         conn.close()
 
+# — Eliminar oferta —
 @router.delete("/delete-admin")
 async def delete_admin_offer(request: Request):
-    """
-    Elimina una oferta de "Job" según jobId.
-    """
     conn = get_db_connection()
-    cur  = conn.cursor()
+    cur = conn.cursor()
     try:
-        data   = await request.json()
+        data = await request.json()
         job_id = int(data.get("jobId") or 0)
         if not job_id:
             raise HTTPException(status_code=400, detail="jobId es requerido")
