@@ -40,13 +40,12 @@ def get_db():
 
 
 router = APIRouter(
-    prefix="/api/admin/templates",
     tags=["admin_templates"],
     dependencies=[Depends(get_current_admin)]
 )
 
 
-@router.get("", summary="Listar todas las plantillas")
+@router.get("/", summary="Listar todas las plantillas")
 def list_templates():
     conn = get_db()
     cur  = conn.cursor(cursor_factory=RealDictCursor)
@@ -74,7 +73,7 @@ def list_templates():
         conn.close()
 
 
-@router.post("", status_code=201, summary="Crear nueva plantilla")
+@router.post("/", status_code=201, summary="Crear nueva plantilla")
 async def create_template(request: Request):
     data     = await request.json()
     name     = data.get("name", "").strip()
@@ -200,14 +199,12 @@ def set_default_template(template_id: int):
     conn = get_db()
     cur  = conn.cursor()
     try:
-        # 1) Obtener el tipo de la plantilla
         cur.execute("SELECT type FROM proposal_templates WHERE id = %s;", (template_id,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Plantilla no encontrada")
         tpl_type = row[0]
 
-        # 2) Desmarcar todas y marcar la elegida
         cur.execute("UPDATE proposal_templates SET is_default = FALSE WHERE type = %s;", (tpl_type,))
         cur.execute("UPDATE proposal_templates SET is_default = TRUE  WHERE id   = %s;", (template_id,))
         conn.commit()
