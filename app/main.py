@@ -33,6 +33,8 @@ from app.routers import (
 from app.routers.matchings_admin import router as matchings_admin_router
 # Router de configuración
 from app.routers.admin_config import router as admin_config_router
+# Router de plantillas de propuesta
+from app.routers.admin_templates import router as admin_templates_router
 
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -105,14 +107,14 @@ app.include_router(
     dependencies=[Depends(get_current_admin)],
 )
 
-# job.router NO tiene prefix interno → lo ponemos aquí
+# job.router NO tiene prefix → lo ponemos aquí
 app.include_router(
     job.router,
     prefix="/api/job",
     tags=["job"],
 )
 
-# job_admin.router YA incluye prefix="/api/job" internamente → sin volver a ponerlo
+# job_admin.router YA incluye prefix="/api/job"
 app.include_router(
     job_admin.router,
     tags=["job_admin"],
@@ -128,14 +130,22 @@ app.include_router(
     tags=["proposals"],
 )
 
-# matchings_admin_router ya define prefix="/api/admin" internamente
+# Plantillas de propuesta (CRUD)
+app.include_router(
+    admin_templates_router,
+    prefix="/api/admin/templates",
+    tags=["admin_templates"],
+    dependencies=[Depends(get_current_admin)]
+)
+
+# matchings_admin_router ya define prefix="/api/admin"
 app.include_router(
     matchings_admin_router,
     tags=["matchings"],
     dependencies=[Depends(get_current_admin)],
 )
 
-# admin_config_router ya define prefix="/api/admin/config" internamente
+# admin_config_router ya define prefix="/api/admin/config"
 app.include_router(
     admin_config_router,
     tags=["admin_config"],

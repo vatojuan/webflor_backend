@@ -1,0 +1,172 @@
+# app/routers/admin_templates.py
+
+import os
+import traceback
+from datetime import datetime
+from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.security import OAuth2PasswordBearer
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
+
+load_dotenv()
+
+router = APIRouter(
+    prefix="/api/admin/templates",
+    tags=["admin_templates"]
+)
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM  = os.getenv("ALGORITHM", "HS256")
+oauth2     = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
+
+def get_db():
+    return psycopg2.connect(
+        dbname=os.getenv("DBNAME"),
+        user=os.getenv("USER"),
+        password=os.getenv("PASSWORD"),
+        host=os.getenv("HOST"),
+        port=int(os.getenv("DB_PORT", 5432)),
+        sslmode="require"
+    )
+
+def get_current_admin(token: str = Depends(oauth2)):
+    from jose import jwt, JWTError
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        sub = payload.get("sub")
+        if not sub:
+            raise HTTPException(status_code=401, detail="Token inválido")
+        return sub
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+@router.get("/", dependencies=[Depends(get_current_admin)])
+def list_templates():
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT
+              id,
+              name,
+              type,
+              content,
+              created_at,
+              updated_at
+            FROM proposal_templates
+            ORDER BY updated_at DESC;
+        """)
+        templates = cur.fetchall()
+        return {"templates": templates}
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(500, "Error al listar plantillas")
+    finally:
+        cur.close()
+        conn.close()
+
+@router.post("/", status_code=201, dependencies=[Depends(get_current_admin)])
+async def create_template(request: Request):
+    data = await request.json()
+    name    = data.get("name", "").strip()
+    tpl_type= data.get("type", "").strip()
+    content = data.get("content", "").strip()
+
+    if not name or tpl_type not in ("automatic", "manual") or not content:
+        raise HTTPException(400, "name, type (automatic|manual) y content son obligatorios")
+
+    now = datetime.utcnow()
+    conn = get_db()
+    cur  = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO proposal_templates
+              (name, type, content, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id, name, type, content, created_at, updated_at;
+        """, (name, tpl_type, content, now, now))
+        tpl = cur.fetchone()
+        conn.commit()
+        return {
+            "template": {
+                "id": tpl[0],
+                "name": tpl[1],
+                "type": tpl[2],
+                "content": tpl[3],
+                "created_at": tpl[4].isoformat(),
+                "updated_at": tpl[5].isoformat()
+            }
+        }
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(500, "Error al crear plantilla")
+    finally:
+        cur.close()
+        conn.close()
+
+@router.put("/{tpl_id}", dependencies=[Depends(get_current_admin)])
+async def update_template(tpl_id: int, request: Request):
+    data = await request.json()
+    name    = data.get("name", "").strip()
+    tpl_type= data.get("type", "").strip()
+    content = data.get("content", "").strip()
+
+    if not name or tpl_type not in ("automatic", "manual") or not content:
+        raise HTTPException(400, "name, type (automatic|manual) y content son obligatorios")
+
+    now = datetime.utcnow()
+    conn = get_db()
+    cur  = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE proposal_templates
+            SET name = %s,
+                type = %s,
+                content = %s,
+                updated_at = %s
+            WHERE id = %s
+            RETURNING id, name, type, content, created_at, updated_at;
+        """, (name, tpl_type, content, now, tpl_id))
+        tpl = cur.fetchone()
+        if not tpl:
+            raise HTTPException(404, "Plantilla no encontrada")
+        conn.commit()
+        return {
+            "template": {
+                "id": tpl[0],
+                "name": tpl[1],
+                "type": tpl[2],
+                "content": tpl[3],
+                "created_at": tpl[4].isoformat(),
+                "updated_at": tpl[5].isoformat()
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(500, "Error al actualizar plantilla")
+    finally:
+        cur.close()
+        conn.close()
+
+@router.delete("/{tpl_id}", dependencies=[Depends(get_current_admin)])
+def delete_template(tpl_id: int):
+    conn = get_db()
+    cur  = conn.cursor()
+    try:
+        cur.execute("DELETE FROM proposal_templates WHERE id = %s RETURNING id;", (tpl_id,))
+        deleted = cur.fetchone()
+        if not deleted:
+            raise HTTPException(404, "Plantilla no encontrada")
+        conn.commit()
+        return {"message": "Plantilla eliminada"}
+    except HTTPException:
+        raise
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(500, "Error al eliminar plantilla")
+    finally:
+        cur.close()
+        conn.close()
