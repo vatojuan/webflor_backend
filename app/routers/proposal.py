@@ -30,7 +30,7 @@ router = APIRouter(
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
 
-def get_current_admin(token: str = Depends(oauth2_scheme)):
+def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
     if not token:
         raise HTTPException(status_code=401, detail="Token no proporcionado")
     try:
@@ -92,6 +92,7 @@ def process_auto_proposal(proposal_id: int):
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        # 1) Obtener estado
         cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id = %s", (proposal_id,))
         row = cur.fetchone()
         if not row:
@@ -102,42 +103,45 @@ def process_auto_proposal(proposal_id: int):
             logger.info(f"Propuesta {proposal_id} ya no está en 'waiting'")
             return
 
-        # Obtengo datos de la oferta, incluyendo contacto admin
+        # 2) Leer datos de la oferta, incluyendo contacto admin
         cur.execute(
             'SELECT title, source, "contactEmail", "contactPhone" FROM "Job" WHERE id = %s',
             (job_id,)
         )
         job_title, source, contact_email, contact_phone = cur.fetchone()
 
-        # Datos del postulante
+        # 3) Leer datos del postulante
         cur.execute('SELECT name, email, "cvUrl" FROM "User" WHERE id = %s', (applicant_id,))
         applicant_name, applicant_email, cv_url = cur.fetchone()
 
-        # Determino destinatario según fuente
+        # 4) Determinar destinatario según fuente
         if source == "admin":
             employer_email = contact_email
             employer_phone = contact_phone
         else:
+            # oferta normal: email/phone del empleador que creó la oferta
             cur.execute(
                 'SELECT email, phone FROM "User" WHERE id = (SELECT "userId" FROM "Job" WHERE id = %s)',
                 (job_id,)
             )
             employer_email, employer_phone = cur.fetchone()
 
+        # 5) Construir asunto / cuerpo
         subject = f"Nueva propuesta para tu oferta: {job_title}"
         body = (
             f"Hola,\n\n"
             f"El postulante {applicant_name} ha aplicado a tu oferta '{job_title}'.\n"
-            f"Contactalo en: {applicant_email}.\n"
-            f"Revisa el CV aquí: {cv_url}\n\n"
+            f"Contactalo en: {applicant_email}.\n\n"
             "Saludos,\nEquipo FAP Mendoza"
         )
 
+        # 6) Envío
         if employer_email:
             send_proposal_email(employer_email, subject, body, attachment_url=cv_url)
         if employer_phone:
             send_whatsapp_message(employer_phone, f"Hola, tenés una nueva propuesta para '{job_title}'.")
 
+        # 7) Marcar como enviado
         cur.execute("UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s", (proposal_id,))
         conn.commit()
         logger.info(f"Propuesta {proposal_id} marcada como 'sent'")
@@ -150,9 +154,9 @@ def process_auto_proposal(proposal_id: int):
 
 @router.post("/create")
 def create_proposal(payload: dict, background_tasks: BackgroundTasks):
-    job_id      = payload.get("job_id")
-    applicant_id= payload.get("applicant_id")
-    label       = payload.get("label")
+    job_id       = payload.get("job_id")
+    applicant_id = payload.get("applicant_id")
+    label        = payload.get("label")
     if not job_id or not applicant_id or not label:
         raise HTTPException(status_code=400, detail="Faltan campos obligatorios")
 
@@ -194,6 +198,7 @@ def send_manual_proposal(proposal_id: int):
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        # 1) Verificar estado
         cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id = %s", (proposal_id,))
         row = cur.fetchone()
         if not row:
@@ -202,15 +207,18 @@ def send_manual_proposal(proposal_id: int):
         if status != "pending":
             raise HTTPException(status_code=400, detail="No está en status 'pending'")
 
+        # 2) Leer datos de la oferta
         cur.execute(
             'SELECT title, source, "contactEmail", "contactPhone" FROM "Job" WHERE id = %s',
             (job_id,)
         )
         job_title, source, contact_email, contact_phone = cur.fetchone()
 
+        # 3) Leer datos del postulante
         cur.execute('SELECT name, email, "cvUrl" FROM "User" WHERE id = %s', (applicant_id,))
         applicant_name, applicant_email, cv_url = cur.fetchone()
 
+        # 4) Determinar destinatario
         if source == "admin":
             employer_email = contact_email
             employer_phone = contact_phone
@@ -221,20 +229,22 @@ def send_manual_proposal(proposal_id: int):
             )
             employer_email, employer_phone = cur.fetchone()
 
+        # 5) Construir mensaje
         subject = f"Nueva propuesta para tu oferta: {job_title}"
         body = (
             f"Hola,\n\n"
             f"El postulante {applicant_name} ha aplicado a tu oferta '{job_title}'.\n"
-            f"Contactalo en: {applicant_email}.\n"
-            f"Revisa el CV aquí: {cv_url}\n\n"
+            f"Contactalo en: {applicant_email}.\n\n"
             "Saludos,\nEquipo FAP Mendoza"
         )
 
+        # 6) Envío
         if employer_email:
             send_proposal_email(employer_email, subject, body, attachment_url=cv_url)
         if employer_phone:
             send_whatsapp_message(employer_phone, f"Hola, tenés una nueva propuesta para '{job_title}'.")
 
+        # 7) Actualizar estado
         cur.execute("UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s", (proposal_id,))
         conn.commit()
         return {"message": "Propuesta enviada correctamente"}
@@ -269,8 +279,8 @@ def list_proposals():
               ua.name    AS applicant_name,
               ua.email   AS applicant_email
             FROM proposals p
-            JOIN "Job"  j  ON p.job_id      = j.id
-            JOIN "User" ua ON p.applicant_id = ua.id
+            JOIN "Job"   j  ON p.job_id      = j.id
+            JOIN "User" ua  ON p.applicant_id = ua.id
             ORDER BY p.created_at DESC
             """
         )
