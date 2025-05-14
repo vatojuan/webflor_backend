@@ -16,6 +16,7 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM  = os.getenv("ALGORITHM", "HS256")
 oauth2     = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
+
 def get_current_admin(token: str = Depends(oauth2)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -25,6 +26,7 @@ def get_current_admin(token: str = Depends(oauth2)):
         return sub
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido")
+
 
 def get_db():
     return psycopg2.connect(
@@ -36,11 +38,13 @@ def get_db():
         sslmode="require"
     )
 
+
 router = APIRouter(
     prefix="/api/admin/templates",
     tags=["admin_templates"],
     dependencies=[Depends(get_current_admin)]
 )
+
 
 @router.get("", summary="Listar todas las plantillas")
 def list_templates():
@@ -58,7 +62,7 @@ def list_templates():
               created_at,
               updated_at
             FROM proposal_templates
-            ORDER BY updated_at DESC;
+            ORDER BY type, is_default DESC, updated_at DESC;
         """)
         templates = cur.fetchall()
         return {"templates": templates}
@@ -69,13 +73,14 @@ def list_templates():
         cur.close()
         conn.close()
 
+
 @router.post("", status_code=201, summary="Crear nueva plantilla")
 async def create_template(request: Request):
-    data    = await request.json()
-    name    = data.get("name", "").strip()
-    tpl_type= data.get("type", "").strip()
-    subject = data.get("subject", "").strip()
-    body    = data.get("body", "").strip()
+    data     = await request.json()
+    name     = data.get("name", "").strip()
+    tpl_type = data.get("type", "").strip()
+    subject  = data.get("subject", "").strip()
+    body     = data.get("body", "").strip()
 
     if not name or tpl_type not in ("automatic", "manual") or not subject or not body:
         raise HTTPException(
@@ -114,13 +119,14 @@ async def create_template(request: Request):
         cur.close()
         conn.close()
 
+
 @router.put("/{tpl_id}", summary="Actualizar plantilla")
 async def update_template(tpl_id: int, request: Request):
-    data    = await request.json()
-    name    = data.get("name", "").strip()
-    tpl_type= data.get("type", "").strip()
-    subject = data.get("subject", "").strip()
-    body    = data.get("body", "").strip()
+    data     = await request.json()
+    name     = data.get("name", "").strip()
+    tpl_type = data.get("type", "").strip()
+    subject  = data.get("subject", "").strip()
+    body     = data.get("body", "").strip()
 
     if not name or tpl_type not in ("automatic", "manual") or not subject or not body:
         raise HTTPException(
@@ -167,6 +173,7 @@ async def update_template(tpl_id: int, request: Request):
         cur.close()
         conn.close()
 
+
 @router.delete("/{tpl_id}", summary="Eliminar plantilla")
 def delete_template(tpl_id: int):
     conn = get_db()
@@ -183,6 +190,35 @@ def delete_template(tpl_id: int):
     except Exception:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error al eliminar plantilla")
+    finally:
+        cur.close()
+        conn.close()
+
+
+@router.post("/{template_id}/set-default", summary="Establecer plantilla predeterminada")
+def set_default_template(template_id: int):
+    conn = get_db()
+    cur  = conn.cursor()
+    try:
+        # 1) Obtener el tipo de la plantilla
+        cur.execute("SELECT type FROM proposal_templates WHERE id = %s;", (template_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Plantilla no encontrada")
+        tpl_type = row[0]
+
+        # 2) Desmarcar todas y marcar la elegida
+        cur.execute("UPDATE proposal_templates SET is_default = FALSE WHERE type = %s;", (tpl_type,))
+        cur.execute("UPDATE proposal_templates SET is_default = TRUE  WHERE id   = %s;", (template_id,))
+        conn.commit()
+        return {"message": f"Plantilla {template_id} ahora es predeterminada para '{tpl_type}'"}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Error interno al establecer default")
     finally:
         cur.close()
         conn.close()
