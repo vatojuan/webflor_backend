@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-router = APIRouter(  # ❌ ya NO tiene prefix aquí
+router = APIRouter(
     tags=["admin_templates"]
 )
 
@@ -38,6 +38,8 @@ def get_current_admin(token: str = Depends(oauth2)):
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido")
 
+# ─── Listar plantillas ───────────────────────────────────────
+@router.get("", dependencies=[Depends(get_current_admin)])
 @router.get("/", dependencies=[Depends(get_current_admin)])
 def list_templates():
     conn = get_db()
@@ -60,11 +62,13 @@ def list_templates():
         return {"templates": templates}
     except Exception:
         traceback.print_exc()
-        raise HTTPException(500, "Error al listar plantillas")
+        raise HTTPException(status_code=500, detail="Error al listar plantillas")
     finally:
         cur.close()
         conn.close()
 
+# ─── Crear nueva plantilla ────────────────────────────────────
+@router.post("", status_code=201, dependencies=[Depends(get_current_admin)])
 @router.post("/", status_code=201, dependencies=[Depends(get_current_admin)])
 async def create_template(request: Request):
     data = await request.json()
@@ -74,7 +78,9 @@ async def create_template(request: Request):
     body    = data.get("body", "").strip()
 
     if not name or tpl_type not in ("automatic", "manual") or not subject or not body:
-        raise HTTPException(400, "name, type (automatic|manual), subject y body son obligatorios")
+        raise HTTPException(status_code=400,
+            detail="name, type (automatic|manual), subject y body son obligatorios"
+        )
 
     now = datetime.utcnow()
     conn = get_db()
@@ -89,17 +95,23 @@ async def create_template(request: Request):
         tpl = cur.fetchone()
         conn.commit()
         return {"template": {
-            "id": tpl[0], "name": tpl[1], "type": tpl[2],
-            "subject": tpl[3], "body": tpl[4], "is_default": tpl[5],
-            "created_at": tpl[6].isoformat(), "updated_at": tpl[7].isoformat()
+            "id": tpl[0],
+            "name": tpl[1],
+            "type": tpl[2],
+            "subject": tpl[3],
+            "body": tpl[4],
+            "is_default": tpl[5],
+            "created_at": tpl[6].isoformat(),
+            "updated_at": tpl[7].isoformat()
         }}
     except Exception:
         traceback.print_exc()
-        raise HTTPException(500, "Error al crear plantilla")
+        raise HTTPException(status_code=500, detail="Error al crear plantilla")
     finally:
         cur.close()
         conn.close()
 
+# ─── Actualizar plantilla ────────────────────────────────────
 @router.put("/{tpl_id}", dependencies=[Depends(get_current_admin)])
 async def update_template(tpl_id: int, request: Request):
     data = await request.json()
@@ -109,7 +121,9 @@ async def update_template(tpl_id: int, request: Request):
     body    = data.get("body", "").strip()
 
     if not name or tpl_type not in ("automatic", "manual") or not subject or not body:
-        raise HTTPException(400, "name, type, subject y body son obligatorios")
+        raise HTTPException(status_code=400,
+            detail="name, type, subject y body son obligatorios"
+        )
 
     now = datetime.utcnow()
     conn = get_db()
@@ -117,29 +131,40 @@ async def update_template(tpl_id: int, request: Request):
     try:
         cur.execute("""
             UPDATE proposal_templates
-            SET name = %s, type = %s, subject = %s, body = %s, updated_at = %s
+            SET name = %s,
+                type = %s,
+                subject = %s,
+                body = %s,
+                updated_at = %s
             WHERE id = %s
             RETURNING id, name, type, subject, body, is_default, created_at, updated_at;
         """, (name, tpl_type, subject, body, now, tpl_id))
         tpl = cur.fetchone()
         if not tpl:
-            raise HTTPException(404, "Plantilla no encontrada")
+            raise HTTPException(status_code=404, detail="Plantilla no encontrada")
         conn.commit()
         return {"template": {
-            "id": tpl[0], "name": tpl[1], "type": tpl[2],
-            "subject": tpl[3], "body": tpl[4], "is_default": tpl[5],
-            "created_at": tpl[6].isoformat(), "updated_at": tpl[7].isoformat()
+            "id": tpl[0],
+            "name": tpl[1],
+            "type": tpl[2],
+            "subject": tpl[3],
+            "body": tpl[4],
+            "is_default": tpl[5],
+            "created_at": tpl[6].isoformat(),
+            "updated_at": tpl[7].isoformat()
         }}
     except HTTPException:
         raise
     except Exception:
         traceback.print_exc()
-        raise HTTPException(500, "Error al actualizar plantilla")
+        raise HTTPException(status_code=500, detail="Error al actualizar plantilla")
     finally:
         cur.close()
         conn.close()
 
+# ─── Eliminar plantilla ──────────────────────────────────────
 @router.delete("/{tpl_id}", dependencies=[Depends(get_current_admin)])
+@router.delete("/{tpl_id}/", dependencies=[Depends(get_current_admin)])
 def delete_template(tpl_id: int):
     conn = get_db()
     cur  = conn.cursor()
@@ -147,14 +172,14 @@ def delete_template(tpl_id: int):
         cur.execute("DELETE FROM proposal_templates WHERE id = %s RETURNING id;", (tpl_id,))
         deleted = cur.fetchone()
         if not deleted:
-            raise HTTPException(404, "Plantilla no encontrada")
+            raise HTTPException(status_code=404, detail="Plantilla no encontrada")
         conn.commit()
         return {"message": "Plantilla eliminada"}
     except HTTPException:
         raise
     except Exception:
         traceback.print_exc()
-        raise HTTPException(500, "Error al eliminar plantilla")
+        raise HTTPException(status_code=500, detail="Error al eliminar plantilla")
     finally:
         cur.close()
         conn.close()
