@@ -133,9 +133,8 @@ app.include_router(
 # Plantillas de propuesta (CRUD + default)
 app.include_router(
     admin_templates_router,
-    prefix="/api/admin/templates",
     tags=["admin_templates"],
-    dependencies=[Depends(get_current_admin)],
+    dependencies=[Depends(get_current_admin)]
 )
 
 # matchings_admin_router ya define prefix="/api/admin"
