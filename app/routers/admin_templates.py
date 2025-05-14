@@ -1,5 +1,3 @@
-# app/routers/admin_templates.py
-
 import os
 import traceback
 from datetime import datetime
@@ -11,8 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-router = APIRouter(
-    prefix="/api/admin/templates",
+router = APIRouter(  # ❌ ya NO tiene prefix aquí
     tags=["admin_templates"]
 )
 
@@ -51,7 +48,9 @@ def list_templates():
               id,
               name,
               type,
-              content,
+              subject,
+              body,
+              is_default,
               created_at,
               updated_at
             FROM proposal_templates
@@ -71,10 +70,11 @@ async def create_template(request: Request):
     data = await request.json()
     name    = data.get("name", "").strip()
     tpl_type= data.get("type", "").strip()
-    content = data.get("content", "").strip()
+    subject = data.get("subject", "").strip()
+    body    = data.get("body", "").strip()
 
-    if not name or tpl_type not in ("automatic", "manual") or not content:
-        raise HTTPException(400, "name, type (automatic|manual) y content son obligatorios")
+    if not name or tpl_type not in ("automatic", "manual") or not subject or not body:
+        raise HTTPException(400, "name, type (automatic|manual), subject y body son obligatorios")
 
     now = datetime.utcnow()
     conn = get_db()
@@ -82,22 +82,17 @@ async def create_template(request: Request):
     try:
         cur.execute("""
             INSERT INTO proposal_templates
-              (name, type, content, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id, name, type, content, created_at, updated_at;
-        """, (name, tpl_type, content, now, now))
+              (name, type, subject, body, is_default, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, FALSE, %s, %s)
+            RETURNING id, name, type, subject, body, is_default, created_at, updated_at;
+        """, (name, tpl_type, subject, body, now, now))
         tpl = cur.fetchone()
         conn.commit()
-        return {
-            "template": {
-                "id": tpl[0],
-                "name": tpl[1],
-                "type": tpl[2],
-                "content": tpl[3],
-                "created_at": tpl[4].isoformat(),
-                "updated_at": tpl[5].isoformat()
-            }
-        }
+        return {"template": {
+            "id": tpl[0], "name": tpl[1], "type": tpl[2],
+            "subject": tpl[3], "body": tpl[4], "is_default": tpl[5],
+            "created_at": tpl[6].isoformat(), "updated_at": tpl[7].isoformat()
+        }}
     except Exception:
         traceback.print_exc()
         raise HTTPException(500, "Error al crear plantilla")
@@ -110,10 +105,11 @@ async def update_template(tpl_id: int, request: Request):
     data = await request.json()
     name    = data.get("name", "").strip()
     tpl_type= data.get("type", "").strip()
-    content = data.get("content", "").strip()
+    subject = data.get("subject", "").strip()
+    body    = data.get("body", "").strip()
 
-    if not name or tpl_type not in ("automatic", "manual") or not content:
-        raise HTTPException(400, "name, type (automatic|manual) y content son obligatorios")
+    if not name or tpl_type not in ("automatic", "manual") or not subject or not body:
+        raise HTTPException(400, "name, type, subject y body son obligatorios")
 
     now = datetime.utcnow()
     conn = get_db()
@@ -121,27 +117,19 @@ async def update_template(tpl_id: int, request: Request):
     try:
         cur.execute("""
             UPDATE proposal_templates
-            SET name = %s,
-                type = %s,
-                content = %s,
-                updated_at = %s
+            SET name = %s, type = %s, subject = %s, body = %s, updated_at = %s
             WHERE id = %s
-            RETURNING id, name, type, content, created_at, updated_at;
-        """, (name, tpl_type, content, now, tpl_id))
+            RETURNING id, name, type, subject, body, is_default, created_at, updated_at;
+        """, (name, tpl_type, subject, body, now, tpl_id))
         tpl = cur.fetchone()
         if not tpl:
             raise HTTPException(404, "Plantilla no encontrada")
         conn.commit()
-        return {
-            "template": {
-                "id": tpl[0],
-                "name": tpl[1],
-                "type": tpl[2],
-                "content": tpl[3],
-                "created_at": tpl[4].isoformat(),
-                "updated_at": tpl[5].isoformat()
-            }
-        }
+        return {"template": {
+            "id": tpl[0], "name": tpl[1], "type": tpl[2],
+            "subject": tpl[3], "body": tpl[4], "is_default": tpl[5],
+            "created_at": tpl[6].isoformat(), "updated_at": tpl[7].isoformat()
+        }}
     except HTTPException:
         raise
     except Exception:
