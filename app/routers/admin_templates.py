@@ -40,12 +40,13 @@ def get_db():
 
 
 router = APIRouter(
+    prefix="/api/admin/templates",   # <-- aquí el prefix
     tags=["admin_templates"],
     dependencies=[Depends(get_current_admin)]
 )
 
 
-@router.get("/", summary="Listar todas las plantillas")
+@router.get("", summary="Listar todas las plantillas")
 def list_templates():
     conn = get_db()
     cur  = conn.cursor(cursor_factory=RealDictCursor)
@@ -73,7 +74,7 @@ def list_templates():
         conn.close()
 
 
-@router.post("/", status_code=201, summary="Crear nueva plantilla")
+@router.post("", status_code=201, summary="Crear nueva plantilla")
 async def create_template(request: Request):
     data     = await request.json()
     name     = data.get("name", "").strip()

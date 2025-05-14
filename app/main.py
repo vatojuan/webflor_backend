@@ -32,7 +32,7 @@ from app.routers.matchings_admin import router as matchings_admin_router
 # Router de configuración
 from app.routers.admin_config import router as admin_config_router
 # Router de plantillas de propuesta
-from app.routers.proposal_templates import router as admin_templates_router
+from app.routers.admin_templates import router as admin_templates_router
 
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -130,7 +130,7 @@ app.include_router(
     tags=["proposals"],
 )
 
-# Plantillas de propuesta (CRUD + default)
+# Plantillas de propuesta (CRUD + default) bajo /api/admin/templates
 app.include_router(
     admin_templates_router,
     prefix="/api/admin/templates",
