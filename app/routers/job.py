@@ -1,117 +1,116 @@
-# app/routers/job.py
-
-from fastapi import APIRouter, HTTPException, Request
+# app/routers/job.py  (sólo el endpoint = código completo actualizado)
+from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi.security import OAuth2PasswordBearer
+from jose import jwt, JWTError
 from datetime import datetime
-import os, traceback, requests
-import psycopg2
+import os, traceback, requests, psycopg2
 from dotenv import load_dotenv
 
 load_dotenv()
+router = APIRouter(prefix="/api/job", tags=["job"])
 
-router = APIRouter()
+# ─────────────────────────  helpers ──────────────────────────
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM  = os.getenv("ALGORITHM", "HS256")
+oauth2     = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
+
+def get_current_admin_sub(token:str=Depends(oauth2)) -> str:
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
+    except (JWTError, KeyError):
+        raise HTTPException(status_code=401, detail="Token inválido")
 
 def get_db_connection():
-    try:
-        return psycopg2.connect(
-            dbname=os.getenv("DBNAME", "postgres"),
-            user=os.getenv("USER"),
-            password=os.getenv("PASSWORD"),
-            host=os.getenv("HOST", "localhost"),
-            port=int(os.getenv("DB_PORT", 5432)),
-            sslmode="require"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en la conexión a la base de datos: {e}")
+    return psycopg2.connect(
+        dbname=os.getenv("DBNAME"), user=os.getenv("USER"),
+        password=os.getenv("PASSWORD"), host=os.getenv("HOST"),
+        port=int(os.getenv("DB_PORT",5432)), sslmode="require"
+    )
 
-def generate_job_embedding(text: str):
+def get_admin_id_by_email(email:str) -> int|None:
+    conn=get_db_connection(); cur=conn.cursor()
+    cur.execute('SELECT id FROM "User" WHERE email=%s LIMIT 1;', (email,))
+    row=cur.fetchone(); cur.close(); conn.close()
+    return row[0] if row else None
+
+def generate_embedding(text:str):
     try:
-        openai_api_key = os.getenv("OPENAI_API_KEY")
         resp = requests.post(
             "https://api.openai.com/v1/embeddings",
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {openai_api_key}"
+                "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}"
             },
-            json={"model": "text-embedding-ada-002", "input": text}
-        )
-        data = resp.json()
-        return data["data"][0]["embedding"]
-    except Exception as e:
-        print("❌ Error generando embedding:", e)
+            json={"model":"text-embedding-ada-002","input":text}
+        ).json()
+        return resp["data"][0]["embedding"]
+    except Exception:
         return None
 
-@router.post("/create-admin")
-async def create_admin_job(request: Request):
-    payload      = await request.json()
-    title        = payload.get("title")
-    description  = payload.get("description")
-    requirements = payload.get("requirements")
-    expiration   = payload.get("expirationDate")
-    user_id      = payload.get("userId")
+# ──────────────────────────  endpoint  ─────────────────────────
+@router.post("/create-admin", status_code=201, dependencies=[Depends(oauth2)])
+async def create_admin_job(request:Request, admin_sub:str=Depends(get_current_admin_sub)):
+    data = await request.json()
 
-    # nuestros nuevos campos:
-    source       = payload.get("source", "admin")
-    label        = payload.get("label", "manual")
-    is_paid      = bool(payload.get("isPaid", False))
-    contact_email= payload.get("contactEmail")
-    contact_phone= payload.get("contactPhone")
+    title       = data.get("title")          or ""
+    description = data.get("description")    or ""
+    requirements= data.get("requirements")   or ""
+    expiration  = data.get("expirationDate")
+    raw_user_id = data.get("userId")         # opcional
+    label       = data.get("label",  "manual")
+    source      = data.get("source", "admin")
+    is_paid     = bool(data.get("isPaid", False))
+    c_email     = data.get("contactEmail")
+    c_phone     = data.get("contactPhone")
 
-    # Validaciones básicas
-    if not title or not description or not user_id:
-        raise HTTPException(status_code=400, detail="Faltan campos obligatorios")
+    if not title or not description:
+        raise HTTPException(status_code=400, detail="title y description son obligatorios")
 
-    # Parseo de fecha
+    # fecha
     exp_date = None
     if expiration:
         try:
-            exp_date = datetime.fromisoformat(expiration.replace("Z", "+00:00"))
-        except Exception:
-            raise HTTPException(status_code=400, detail="Formato de fecha inválido. Use ISO 8601")
+            exp_date = datetime.fromisoformat(expiration.replace("Z","+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="expirationDate inválida (ISO-8601)")
 
-    # Parseo de userId
+    # userId: si es entero lo usamos; si no, buscamos por email
     try:
-        user_id = int(user_id)
+        user_id = int(raw_user_id)
     except Exception:
-        raise HTTPException(status_code=400, detail="userId debe ser un entero")
+        user_id = get_admin_id_by_email(admin_sub)
+        if not user_id:
+            raise HTTPException(status_code=400, detail="No se encontró admin en la tabla User")
 
-    # Generación de embedding
-    job_text = f"{title}\n\n{description}\n\n{requirements or ''}"
-    embedding = generate_job_embedding(job_text)
-    if embedding:
-        print("✅ Embedding generado exitosamente")
-    else:
-        print("⚠️ No se generó el embedding, se procederá sin él.")
+    # embedding
+    embedding = generate_embedding(f"{title}\n{description}\n{requirements}")
 
-    # Inserción en BD, ahora con source, label, is_paid, contact_email, contact_phone
+    # insert
     try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
+        conn=get_db_connection(); cur=conn.cursor()
         cur.execute("""
             INSERT INTO "Job"
-                (title, description, requirements, "expirationDate", "userId",
-                 embedding, source, label, "isPaid", "contactEmail", "contactPhone")
-            VALUES
-                (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+              (title, description, requirements, "expirationDate",
+               "userId", embedding, label, source,
+               is_paid, contact_email, contact_phone)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             RETURNING id;
         """, (
-            title,
-            description,
-            requirements,
-            exp_date,
-            user_id,
-            embedding,
-            source,
-            label,
-            is_paid,
-            contact_email,
-            contact_phone
+            title, description, requirements, exp_date,
+            user_id, embedding, label, source,
+            is_paid, c_email, c_phone
         ))
         job_id = cur.fetchone()[0]
-        conn.commit()
-        cur.close()
-        conn.close()
-        return {"message": "Oferta creada", "jobId": job_id}
-
-    except Exception:
-        print("❌ Error al insertar en Job:\n", traceback.format_exc())
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        conn.commit(); cur.close(); conn.close()
+        return {"message":"Oferta creada","jobId":job_id}
+    except psycopg2.errors.UndefinedColumn as e:
+        # Columnas faltantes => avisar (migración)
+        conn.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Columnas is_paid / contact_email / contact_phone faltan en la tabla Job"
+        )
+    except Exception as e:
+        conn.rollback()
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Error interno al crear la oferta")
