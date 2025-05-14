@@ -1,5 +1,3 @@
-# main.py
-
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Request
@@ -34,7 +32,7 @@ from app.routers.matchings_admin import router as matchings_admin_router
 # Router de configuración
 from app.routers.admin_config import router as admin_config_router
 # Router de plantillas de propuesta
-from app.routers.admin_templates import router as admin_templates_router
+from app.routers.proposal_templates import router as admin_templates_router
 
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -63,9 +61,11 @@ app.add_middleware(
 # Logging middleware
 @app.middleware("http")
 async def log_request(request: Request, call_next):
-    print("📥", request.method, request.url.path,
-          "proto=", request.headers.get("x-forwarded-proto"),
-          "host=", request.headers.get("host"))
+    print(
+        "📥", request.method, request.url.path,
+        "proto=", request.headers.get("x-forwarded-proto"),
+        "host=", request.headers.get("host")
+    )
     resp = await call_next(request)
     print("📤", resp.status_code)
     return resp
@@ -130,12 +130,12 @@ app.include_router(
     tags=["proposals"],
 )
 
-# Plantillas de propuesta (CRUD)
+# Plantillas de propuesta (CRUD + default)
 app.include_router(
     admin_templates_router,
     prefix="/api/admin/templates",
     tags=["admin_templates"],
-    dependencies=[Depends(get_current_admin)]
+    dependencies=[Depends(get_current_admin)],
 )
 
 # matchings_admin_router ya define prefix="/api/admin"
