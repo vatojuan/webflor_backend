@@ -1,3 +1,5 @@
+# app/routers/admin_templates.py
+
 import os
 import traceback
 from datetime import datetime
@@ -6,16 +8,23 @@ from fastapi.security import OAuth2PasswordBearer
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+from jose import jwt, JWTError
 
 load_dotenv()
-
-router = APIRouter(
-    tags=["admin_templates"]
-)
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM  = os.getenv("ALGORITHM", "HS256")
 oauth2     = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
+
+def get_current_admin(token: str = Depends(oauth2)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        sub = payload.get("sub")
+        if not sub:
+            raise HTTPException(status_code=401, detail="Token inválido")
+        return sub
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token inválido")
 
 def get_db():
     return psycopg2.connect(
@@ -27,20 +36,13 @@ def get_db():
         sslmode="require"
     )
 
-def get_current_admin(token: str = Depends(oauth2)):
-    from jose import jwt, JWTError
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        sub = payload.get("sub")
-        if not sub:
-            raise HTTPException(status_code=401, detail="Token inválido")
-        return sub
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token inválido")
+router = APIRouter(
+    prefix="/api/admin/templates",
+    tags=["admin_templates"],
+    dependencies=[Depends(get_current_admin)]
+)
 
-# ─── Listar plantillas ───────────────────────────────────────
-@router.get("", dependencies=[Depends(get_current_admin)])
-@router.get("/", dependencies=[Depends(get_current_admin)])
+@router.get("", summary="Listar todas las plantillas")
 def list_templates():
     conn = get_db()
     cur  = conn.cursor(cursor_factory=RealDictCursor)
@@ -67,18 +69,17 @@ def list_templates():
         cur.close()
         conn.close()
 
-# ─── Crear nueva plantilla ────────────────────────────────────
-@router.post("", status_code=201, dependencies=[Depends(get_current_admin)])
-@router.post("/", status_code=201, dependencies=[Depends(get_current_admin)])
+@router.post("", status_code=201, summary="Crear nueva plantilla")
 async def create_template(request: Request):
-    data = await request.json()
+    data    = await request.json()
     name    = data.get("name", "").strip()
     tpl_type= data.get("type", "").strip()
     subject = data.get("subject", "").strip()
     body    = data.get("body", "").strip()
 
     if not name or tpl_type not in ("automatic", "manual") or not subject or not body:
-        raise HTTPException(status_code=400,
+        raise HTTPException(
+            status_code=400,
             detail="name, type (automatic|manual), subject y body son obligatorios"
         )
 
@@ -94,16 +95,18 @@ async def create_template(request: Request):
         """, (name, tpl_type, subject, body, now, now))
         tpl = cur.fetchone()
         conn.commit()
-        return {"template": {
-            "id": tpl[0],
-            "name": tpl[1],
-            "type": tpl[2],
-            "subject": tpl[3],
-            "body": tpl[4],
-            "is_default": tpl[5],
-            "created_at": tpl[6].isoformat(),
-            "updated_at": tpl[7].isoformat()
-        }}
+        return {
+            "template": {
+                "id": tpl[0],
+                "name": tpl[1],
+                "type": tpl[2],
+                "subject": tpl[3],
+                "body": tpl[4],
+                "is_default": tpl[5],
+                "created_at": tpl[6].isoformat(),
+                "updated_at": tpl[7].isoformat()
+            }
+        }
     except Exception:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error al crear plantilla")
@@ -111,17 +114,17 @@ async def create_template(request: Request):
         cur.close()
         conn.close()
 
-# ─── Actualizar plantilla ────────────────────────────────────
-@router.put("/{tpl_id}", dependencies=[Depends(get_current_admin)])
+@router.put("/{tpl_id}", summary="Actualizar plantilla")
 async def update_template(tpl_id: int, request: Request):
-    data = await request.json()
+    data    = await request.json()
     name    = data.get("name", "").strip()
     tpl_type= data.get("type", "").strip()
     subject = data.get("subject", "").strip()
     body    = data.get("body", "").strip()
 
     if not name or tpl_type not in ("automatic", "manual") or not subject or not body:
-        raise HTTPException(status_code=400,
+        raise HTTPException(
+            status_code=400,
             detail="name, type, subject y body son obligatorios"
         )
 
@@ -143,16 +146,18 @@ async def update_template(tpl_id: int, request: Request):
         if not tpl:
             raise HTTPException(status_code=404, detail="Plantilla no encontrada")
         conn.commit()
-        return {"template": {
-            "id": tpl[0],
-            "name": tpl[1],
-            "type": tpl[2],
-            "subject": tpl[3],
-            "body": tpl[4],
-            "is_default": tpl[5],
-            "created_at": tpl[6].isoformat(),
-            "updated_at": tpl[7].isoformat()
-        }}
+        return {
+            "template": {
+                "id": tpl[0],
+                "name": tpl[1],
+                "type": tpl[2],
+                "subject": tpl[3],
+                "body": tpl[4],
+                "is_default": tpl[5],
+                "created_at": tpl[6].isoformat(),
+                "updated_at": tpl[7].isoformat()
+            }
+        }
     except HTTPException:
         raise
     except Exception:
@@ -162,9 +167,7 @@ async def update_template(tpl_id: int, request: Request):
         cur.close()
         conn.close()
 
-# ─── Eliminar plantilla ──────────────────────────────────────
-@router.delete("/{tpl_id}", dependencies=[Depends(get_current_admin)])
-@router.delete("/{tpl_id}/", dependencies=[Depends(get_current_admin)])
+@router.delete("/{tpl_id}", summary="Eliminar plantilla")
 def delete_template(tpl_id: int):
     conn = get_db()
     cur  = conn.cursor()
