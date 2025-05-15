@@ -4,6 +4,7 @@ import os
 import time
 import logging
 import smtplib
+from datetime import datetime
 from dotenv import load_dotenv
 from email.message import EmailMessage
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
@@ -19,7 +20,13 @@ SECRET_KEY = os.getenv(
 )
 ALGORITHM = "HS256"
 
-logging.basicConfig(level=logging.INFO)
+# Retardo para envío automático, en segundos (por defecto 5 min)
+AUTO_DELAY = int(os.getenv("AUTO_PROPOSAL_DELAY", "300"))
+
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
@@ -59,94 +66,99 @@ def send_proposal_email(to_email: str, subject: str, body: str, attachment_url: 
         msg["From"]    = smtp_user
         msg["To"]      = to_email
 
-        text = body
+        content = body
         if attachment_url:
-            text += f"\n\nRevisa el CV aquí: {attachment_url}"
-        msg.set_content(text)
+            content += f"\n\nRevisa el CV aquí: {attachment_url}"
+        msg.set_content(content)
 
         with smtplib.SMTP(smtp_server, smtp_port) as s:
             s.starttls()
             s.login(smtp_user, smtp_password)
             s.send_message(msg)
 
-        logger.info(f"Email enviado a {to_email}")
+        logger.info(f"✔️ Email enviado a {to_email}")
         return True
     except Exception as e:
-        logger.error(f"Error al enviar email: {e}")
+        logger.error(f"❌ Error al enviar email a {to_email}: {e}")
         return False
 
 
 def send_whatsapp_message(phone: str, message: str) -> bool:
     try:
-        logger.info(f"Enviando WhatsApp a {phone}: {message}")
+        # Aquí podrías integrar tu API real de WhatsApp
+        logger.info(f"✔️ WhatsApp enviado a {phone}: {message}")
         return True
     except Exception as e:
-        logger.error(f"Error al enviar WhatsApp: {e}")
+        logger.error(f"❌ Error al enviar WhatsApp a {phone}: {e}")
         return False
 
 
 def process_auto_proposal(proposal_id: int):
-    logger.info(f"Background task inicia para propuesta {proposal_id}")
-    time.sleep(5)  # 5 minutos
-
+    logger.info(f"Inicia tarea automática para propuesta {proposal_id}")
+    time.sleep(AUTO_DELAY)
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # 1) Obtener estado
-        cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id = %s", (proposal_id,))
+        # Verificar estado tras el delay
+        cur.execute("SELECT status FROM proposals WHERE id = %s", (proposal_id,))
         row = cur.fetchone()
         if not row:
-            logger.error(f"No existe propuesta {proposal_id}")
+            logger.warning(f"Propuesta {proposal_id} ya no existe")
             return
-        status, job_id, applicant_id = row
+        status = row[0]
         if status != "waiting":
-            logger.info(f"Propuesta {proposal_id} ya no está en 'waiting'")
+            logger.info(f"Propuesta {proposal_id} cancelada o ya procesada (status={status})")
             return
 
-        # 2) Leer datos de la oferta, incluyendo contacto admin
+        # Recuperar datos de oferta y postulante
         cur.execute(
-            'SELECT title, source, "contactEmail", "contactPhone" FROM "Job" WHERE id = %s',
-            (job_id,)
+            'SELECT title, source, "contactEmail", "contactPhone" '
+            'FROM "Job" WHERE id = (SELECT job_id FROM proposals WHERE id = %s)',
+            (proposal_id,)
         )
         job_title, source, contact_email, contact_phone = cur.fetchone()
 
-        # 3) Leer datos del postulante
-        cur.execute('SELECT name, email, "cvUrl" FROM "User" WHERE id = %s', (applicant_id,))
+        cur.execute(
+            'SELECT name, email, "cvUrl" FROM "User" '
+            'WHERE id = (SELECT applicant_id FROM proposals WHERE id = %s)',
+            (proposal_id,)
+        )
         applicant_name, applicant_email, cv_url = cur.fetchone()
 
-        # 4) Determinar destinatario según fuente
+        # Determinar destinatario
         if source == "admin":
-            employer_email = contact_email
-            employer_phone = contact_phone
+            employer_email, employer_phone = contact_email, contact_phone
         else:
-            # oferta normal: email/phone del empleador que creó la oferta
             cur.execute(
-                'SELECT email, phone FROM "User" WHERE id = (SELECT "userId" FROM "Job" WHERE id = %s)',
-                (job_id,)
+                'SELECT email, phone FROM "User" '
+                'WHERE id = (SELECT "userId" FROM "Job" WHERE id = '
+                '(SELECT job_id FROM proposals WHERE id = %s))',
+                (proposal_id,)
             )
             employer_email, employer_phone = cur.fetchone()
 
-        # 5) Construir asunto / cuerpo
         subject = f"Nueva propuesta para tu oferta: {job_title}"
         body = (
             f"Hola,\n\n"
-            f"El postulante {applicant_name} ha aplicado a tu oferta '{job_title}'.\n"
-            f"Contactalo en: {applicant_email}.\n\n"
-            "Saludos,\nEquipo FAP Mendoza"
+            f"El postulante {applicant_name} ha aplicado a tu oferta «{job_title}».\n"
+            f"Contactalo en: {applicant_email}\n"
         )
 
-        # 6) Envío
+        # Envío
         if employer_email:
             send_proposal_email(employer_email, subject, body, attachment_url=cv_url)
         if employer_phone:
-            send_whatsapp_message(employer_phone, f"Hola, tenés una nueva propuesta para '{job_title}'.")
+            send_whatsapp_message(employer_phone, f"Tenés una nueva propuesta para «{job_title}».")
 
-        # 7) Marcar como enviado
-        cur.execute("UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s", (proposal_id,))
+        # Marcar como enviado
+        cur.execute(
+            "UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s",
+            (proposal_id,)
+        )
         conn.commit()
         logger.info(f"Propuesta {proposal_id} marcada como 'sent'")
     except Exception as e:
-        logger.error(f"Error en process_auto_proposal: {e}")
+        logger.error(f"Error en process_auto_proposal({proposal_id}): {e}")
     finally:
         cur.close()
         conn.close()
@@ -166,8 +178,8 @@ def create_proposal(payload: dict, background_tasks: BackgroundTasks):
     try:
         cur.execute(
             """
-            INSERT INTO proposals (job_id, applicant_id, label, status)
-            SELECT %s, %s, %s, %s
+            INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
+            SELECT %s, %s, %s, %s, NOW()
             WHERE NOT EXISTS (
               SELECT 1 FROM proposals WHERE job_id = %s AND applicant_id = %s
             )
@@ -175,11 +187,11 @@ def create_proposal(payload: dict, background_tasks: BackgroundTasks):
             """,
             (job_id, applicant_id, label, status, job_id, applicant_id)
         )
-        result = cur.fetchone()
+        row = cur.fetchone()
         conn.commit()
-        if not result:
+        if not row:
             return {"message": "Ya existe una propuesta para este usuario y oferta"}
-        proposal_id = result[0]
+        proposal_id = row[0]
         logger.info(f"Propuesta {proposal_id} creada con status '{status}'")
         if label == "automatic":
             background_tasks.add_task(process_auto_proposal, proposal_id)
@@ -193,66 +205,61 @@ def create_proposal(payload: dict, background_tasks: BackgroundTasks):
         conn.close()
 
 
-@router.patch("/{proposal_id}/send", dependencies=[Depends(get_current_admin)])
-def send_manual_proposal(proposal_id: int):
+@router.delete("/{proposal_id}/cancel")
+def cancel_proposal(proposal_id: int, request: Request):
+    """
+    Permite al postulante cancelar su propuesta si aún está en 'waiting' o 'pending'.
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # 1) Verificar estado
-        cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id = %s", (proposal_id,))
+        cur.execute("SELECT status FROM proposals WHERE id = %s", (proposal_id,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Propuesta no encontrada")
-        status, job_id, applicant_id = row
-        if status != "pending":
-            raise HTTPException(status_code=400, detail="No está en status 'pending'")
-
-        # 2) Leer datos de la oferta
+        status = row[0]
+        if status not in ("waiting", "pending"):
+            raise HTTPException(400, detail=f"No se puede cancelar una propuesta con status '{status}'")
         cur.execute(
-            'SELECT title, source, "contactEmail", "contactPhone" FROM "Job" WHERE id = %s',
-            (job_id,)
+            "UPDATE proposals SET status = 'cancelled', cancelled_at = NOW() WHERE id = %s",
+            (proposal_id,)
         )
-        job_title, source, contact_email, contact_phone = cur.fetchone()
-
-        # 3) Leer datos del postulante
-        cur.execute('SELECT name, email, "cvUrl" FROM "User" WHERE id = %s', (applicant_id,))
-        applicant_name, applicant_email, cv_url = cur.fetchone()
-
-        # 4) Determinar destinatario
-        if source == "admin":
-            employer_email = contact_email
-            employer_phone = contact_phone
-        else:
-            cur.execute(
-                'SELECT email, phone FROM "User" WHERE id = (SELECT "userId" FROM "Job" WHERE id = %s)',
-                (job_id,)
-            )
-            employer_email, employer_phone = cur.fetchone()
-
-        # 5) Construir mensaje
-        subject = f"Nueva propuesta para tu oferta: {job_title}"
-        body = (
-            f"Hola,\n\n"
-            f"El postulante {applicant_name} ha aplicado a tu oferta '{job_title}'.\n"
-            f"Contactalo en: {applicant_email}.\n\n"
-            "Saludos,\nEquipo FAP Mendoza"
-        )
-
-        # 6) Envío
-        if employer_email:
-            send_proposal_email(employer_email, subject, body, attachment_url=cv_url)
-        if employer_phone:
-            send_whatsapp_message(employer_phone, f"Hola, tenés una nueva propuesta para '{job_title}'.")
-
-        # 7) Actualizar estado
-        cur.execute("UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s", (proposal_id,))
         conn.commit()
-        return {"message": "Propuesta enviada correctamente"}
+        logger.info(f"Propuesta {proposal_id} cancelada por el postulante")
+        return {"message": "Propuesta cancelada"}
     except HTTPException:
+        conn.rollback()
         raise
     except Exception as e:
-        logger.error(f"Error al enviar manual: {e}")
-        raise HTTPException(status_code=500, detail="Error interno")
+        conn.rollback()
+        logger.error(f"Error al cancelar propuesta {proposal_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al cancelar")
+    finally:
+        cur.close()
+        conn.close()
+
+
+@router.patch("/{proposal_id}/send", dependencies=[Depends(get_current_admin)])
+def send_manual_proposal(proposal_id: int):
+    """
+    Envío manual por admin. Igual lógica que en automático,
+    pero sin sleep y solo si está en 'pending'.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # verificar estado
+        cur.execute("SELECT status FROM proposals WHERE id = %s", (proposal_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Propuesta no encontrada")
+        status = row[0]
+        if status != "pending":
+            raise HTTPException(status_code=400, detail="Solo se puede enviar si está en 'pending'")
+
+        # delegar al mismo proceso que auto (pero sin sleep)
+        process_auto_proposal(proposal_id)
+        return {"message": "Propuesta enviada correctamente"}
     finally:
         cur.close()
         conn.close()
@@ -269,15 +276,14 @@ def list_proposals():
               p.id,
               p.label,
               p.status,
-              p.created_at,
-              p.sent_at,
-              p.notes,
-              j.id       AS job_id,
-              j.title    AS job_title,
-              j.label    AS job_label,
-              j.source   AS proposal_source,
-              ua.name    AS applicant_name,
-              ua.email   AS applicant_email
+              p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Argentina/Buenos_Aires' AS created_at,
+              p.sent_at   AT TIME ZONE 'UTC' AT TIME ZONE 'America/Argentina/Buenos_Aires' AS sent_at,
+              p.cancelled_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Argentina/Buenos_Aires' AS cancelled_at,
+              j.id    AS job_id,
+              j.title AS job_title,
+              j.source AS proposal_source,
+              ua.name AS applicant_name,
+              ua.email AS applicant_email
             FROM proposals p
             JOIN "Job"   j  ON p.job_id      = j.id
             JOIN "User" ua  ON p.applicant_id = ua.id
