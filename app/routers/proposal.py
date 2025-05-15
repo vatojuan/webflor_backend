@@ -85,7 +85,7 @@ def send_proposal_email(to_email: str, subject: str, body: str, attachment_url: 
 
 def send_whatsapp_message(phone: str, message: str) -> bool:
     try:
-        # Aquí podrías integrar tu API real de WhatsApp
+        # Integración simulada de WhatsApp
         logger.info(f"✔️ WhatsApp enviado a {phone}: {message}")
         return True
     except Exception as e:
@@ -96,47 +96,52 @@ def send_whatsapp_message(phone: str, message: str) -> bool:
 def process_auto_proposal(proposal_id: int):
     logger.info(f"Inicia tarea automática para propuesta {proposal_id}")
     time.sleep(AUTO_DELAY)
+
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # Verificar estado tras el delay
+        # 1) Verificar estado tras el delay
         cur.execute("SELECT status FROM proposals WHERE id = %s", (proposal_id,))
         row = cur.fetchone()
         if not row:
-            logger.warning(f"Propuesta {proposal_id} ya no existe")
+            logger.warning(f"Propuesta {proposal_id} no existe")
             return
         status = row[0]
         if status != "waiting":
-            logger.info(f"Propuesta {proposal_id} cancelada o ya procesada (status={status})")
+            logger.info(f"Propuesta {proposal_id} no está en 'waiting' (status={status}), se omite")
             return
 
-        # Recuperar datos de oferta y postulante
+        # 2) Obtener datos de oferta y postulante
         cur.execute(
-            'SELECT title, source, "contactEmail", "contactPhone" '
-            'FROM "Job" WHERE id = (SELECT job_id FROM proposals WHERE id = %s)',
+            'SELECT job_id, applicant_id FROM proposals WHERE id = %s',
             (proposal_id,)
+        )
+        job_id, applicant_id = cur.fetchone()
+
+        cur.execute(
+            'SELECT title, source, "contactEmail", "contactPhone" FROM "Job" WHERE id = %s',
+            (job_id,)
         )
         job_title, source, contact_email, contact_phone = cur.fetchone()
 
         cur.execute(
-            'SELECT name, email, "cvUrl" FROM "User" '
-            'WHERE id = (SELECT applicant_id FROM proposals WHERE id = %s)',
-            (proposal_id,)
+            'SELECT name, email, "cvUrl" FROM "User" WHERE id = %s',
+            (applicant_id,)
         )
         applicant_name, applicant_email, cv_url = cur.fetchone()
 
-        # Determinar destinatario
+        # 3) Determinar destinatario
         if source == "admin":
             employer_email, employer_phone = contact_email, contact_phone
         else:
             cur.execute(
-                'SELECT email, phone FROM "User" '
-                'WHERE id = (SELECT "userId" FROM "Job" WHERE id = '
-                '(SELECT job_id FROM proposals WHERE id = %s))',
-                (proposal_id,)
+                'SELECT email, phone FROM "User" WHERE id = '
+                '(SELECT "userId" FROM "Job" WHERE id = %s)',
+                (job_id,)
             )
             employer_email, employer_phone = cur.fetchone()
 
+        # 4) Construir mensaje
         subject = f"Nueva propuesta para tu oferta: {job_title}"
         body = (
             f"Hola,\n\n"
@@ -144,13 +149,13 @@ def process_auto_proposal(proposal_id: int):
             f"Contactalo en: {applicant_email}\n"
         )
 
-        # Envío
+        # 5) Envío
         if employer_email:
             send_proposal_email(employer_email, subject, body, attachment_url=cv_url)
         if employer_phone:
             send_whatsapp_message(employer_phone, f"Tenés una nueva propuesta para «{job_title}».")
 
-        # Marcar como enviado
+        # 6) Actualizar estado
         cur.execute(
             "UPDATE proposals SET status = 'sent', sent_at = NOW() WHERE id = %s",
             (proposal_id,)
@@ -206,7 +211,7 @@ def create_proposal(payload: dict, background_tasks: BackgroundTasks):
 
 
 @router.delete("/{proposal_id}/cancel")
-def cancel_proposal(proposal_id: int, request: Request):
+def cancel_proposal(proposal_id: int):
     """
     Permite al postulante cancelar su propuesta si aún está en 'waiting' o 'pending'.
     """
@@ -219,7 +224,7 @@ def cancel_proposal(proposal_id: int, request: Request):
             raise HTTPException(status_code=404, detail="Propuesta no encontrada")
         status = row[0]
         if status not in ("waiting", "pending"):
-            raise HTTPException(400, detail=f"No se puede cancelar una propuesta con status '{status}'")
+            raise HTTPException(status_code=400, detail=f"No se puede cancelar una propuesta con status '{status}'")
         cur.execute(
             "UPDATE proposals SET status = 'cancelled', cancelled_at = NOW() WHERE id = %s",
             (proposal_id,)
@@ -248,7 +253,6 @@ def send_manual_proposal(proposal_id: int):
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # verificar estado
         cur.execute("SELECT status FROM proposals WHERE id = %s", (proposal_id,))
         row = cur.fetchone()
         if not row:
@@ -257,9 +261,39 @@ def send_manual_proposal(proposal_id: int):
         if status != "pending":
             raise HTTPException(status_code=400, detail="Solo se puede enviar si está en 'pending'")
 
-        # delegar al mismo proceso que auto (pero sin sleep)
+        # Reutiliza el envío automático sin delay
         process_auto_proposal(proposal_id)
         return {"message": "Propuesta enviada correctamente"}
+    finally:
+        cur.close()
+        conn.close()
+
+
+@router.delete("/{proposal_id}", dependencies=[Depends(get_current_admin)])
+def delete_cancelled_proposal(proposal_id: int):
+    """
+    Permite al admin eliminar propuestas con status 'cancelled'.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT status FROM proposals WHERE id = %s", (proposal_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Propuesta no encontrada")
+        if row[0] != "cancelled":
+            raise HTTPException(status_code=400, detail="Solo se pueden borrar propuestas canceladas")
+        cur.execute("DELETE FROM proposals WHERE id = %s", (proposal_id,))
+        conn.commit()
+        logger.info(f"Propuesta {proposal_id} eliminada por admin")
+        return {"message": "Propuesta cancelada eliminada"}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error al eliminar propuesta {proposal_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al eliminar")
     finally:
         cur.close()
         conn.close()
@@ -286,7 +320,7 @@ def list_proposals():
               ua.email AS applicant_email
             FROM proposals p
             JOIN "Job"   j  ON p.job_id      = j.id
-            JOIN "User" ua  ON p.applicant_id = ua.id
+            JOIN "User" ua ON p.applicant_id = ua.id
             ORDER BY p.created_at DESC
             """
         )
