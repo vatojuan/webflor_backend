@@ -87,7 +87,7 @@ def send_whatsapp_message(phone: str, message: str) -> bool:
 
 def process_auto_proposal(proposal_id: int):
     logger.info(f"Background task inicia para propuesta {proposal_id}")
-    time.sleep(300)  # 5 minutos
+    time.sleep(5)  # 5 minutos
 
     conn = get_db_connection()
     cur = conn.cursor()
