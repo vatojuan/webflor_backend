@@ -11,7 +11,7 @@ load_dotenv()
 
 SECRET_KEY  = os.getenv("SECRET_KEY")
 ALGORITHM   = os.getenv("ALGORITHM", "HS256")
-AUTO_DELAY  = int(os.getenv("AUTO_PROPOSAL_DELAY", "300"))  # seg → 5 min por defecto
+AUTO_DELAY  = int(os.getenv("AUTO_PROPOSAL_DELAY", "300"))   # 5 min por defecto
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 router        = APIRouter(prefix="/api/proposals", tags=["proposals"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
-# ──────────────────────────  helpers  ──────────────────────────
+# ─────────────────── helpers ───────────────────
 def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
     if not token:
         raise HTTPException(401, "Token no proporcionado")
@@ -29,36 +29,35 @@ def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
     except JWTError:
         raise HTTPException(401, "Token inválido")
 
-
 def db() -> psycopg2.extensions.connection:
-    """Conexión sin autocommit; cada write deberá hacer commit explícito."""
     conn = engine.raw_connection()
     conn.autocommit = False
     return conn
 
-# ──────────────────────  e-mail / WhatsApp  ────────────────────
-def send_mail(dest: str, subj: str, body: str, cv: str | None):
+# ─────────────── mail / WhatsApp ───────────────
+def send_mail(dest: str | None, subj: str, body: str, cv: str | None):
+    if not dest:
+        logger.warning("❗ Sin e-mail destino, se omite envío"); return
     try:
         host, port = os.getenv("SMTP_SERVER"), int(os.getenv("SMTP_PORT", 587))
         user, pwd  = os.getenv("SMTP_USER"),   os.getenv("SMTP_PASS")
-
         msg = EmailMessage()
         msg["From"], msg["To"], msg["Subject"] = user, dest, subj
         msg.set_content(body + (f"\n\nCV: {cv}" if cv else ""))
         with smtplib.SMTP(host, port) as s:
             s.starttls(); s.login(user, pwd); s.send_message(msg)
-        logger.info(f"✉️  Mail → {dest}")
+        logger.info(f"✉️  Mail enviado → {dest}")
     except Exception:
         logger.exception("send_mail error")
 
-def send_whatsapp(phone: str, txt: str):
+def send_whatsapp(phone: str | None, txt: str):
     if phone:
         logger.info(f"📲 WhatsApp → {phone}: {txt}")
 
-# ─────────────────────  background delivery  ───────────────────
+# ───────────── background delivery ─────────────
 def deliver(pid: int, sleep_first: bool):
     if sleep_first:
-        logger.info(f"⏳ background task {pid} – sleep {AUTO_DELAY}s")
+        logger.info(f"⏳ task {pid}: sleep {AUTO_DELAY}s")
         time.sleep(AUTO_DELAY)
 
     conn = cur = None
@@ -66,37 +65,48 @@ def deliver(pid: int, sleep_first: bool):
         conn, cur = db(), None
         cur = conn.cursor()
 
+        # 1) estado actual
         cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id=%s", (pid,))
         row = cur.fetchone()
-        if not row:
-            logger.warning(f"Propuesta {pid} no existe"); return
+        if not row: logger.warning(f"Propuesta {pid} no existe"); return
         status, job_id, applicant_id = row
         if sleep_first and status != "waiting":
-            logger.info(f"Propuesta {pid} ya no está waiting ({status})"); return
+            logger.info(f"Propuesta {pid} dejó waiting ({status})"); return
         if (not sleep_first) and status != "pending":
             raise HTTPException(400, "Solo pending")
 
-        # ---- datos de la oferta ----
-        cur.execute('SELECT title, source, "contactEmail", "contactPhone", "userId" FROM "Job" WHERE id=%s', (job_id,))
-        title, source, c_mail, c_phone, owner = cur.fetchone()
+        # 2) información de la oferta (usamos SELECT * para tolerar snake/camel)
+        cur.execute('SELECT * FROM "Job" WHERE id=%s', (job_id,))
+        jrow  = cur.fetchone()
+        if not jrow: logger.error(f"Job {job_id} no hallado"); return
+        jcols = [d[0] for d in cur.description]
+        job   = dict(zip(jcols, jrow))
 
-        # ---- postulante ----
+        title   = job.get("title")
+        source  = job.get("source")
+        owner   = job.get("userId") or job.get("user_id")
+
+        contact_mail  = job.get("contactEmail")  or job.get("contact_email")
+        contact_phone = job.get("contactPhone")  or job.get("contact_phone")
+
+        # 3) datos del postulante
         cur.execute('SELECT name, email, "cvUrl" FROM "User" WHERE id=%s', (applicant_id,))
         a_name, a_mail, cv_url = cur.fetchone()
 
-        # ---- destino final ----
+        # 4) a quién enviar
         if source == "admin":
-            dest_mail, dest_phone = c_mail, c_phone
+            dest_mail, dest_phone = contact_mail, contact_phone
         else:
             cur.execute('SELECT email, phone FROM "User" WHERE id=%s', (owner,))
             dest_mail, dest_phone = cur.fetchone()
 
+        # 5) envío
         subj = f"Nueva propuesta – {title}"
-        body = f"Hola,\n\n{a_name} se postuló a «{title}».\nMail: {a_mail}\n"
-
+        body = f"Hola,\n\n{a_name} se postuló a «{title}».\nMail candidato: {a_mail}\n"
         send_mail(dest_mail, subj, body, cv_url)
         send_whatsapp(dest_phone, f"Nueva propuesta para «{title}».")
 
+        # 6) marcar enviada
         cur.execute("UPDATE proposals SET status='sent', sent_at=NOW() WHERE id=%s", (pid,))
         conn.commit()
         logger.info(f"✅ propuesta {pid} → sent")
@@ -108,7 +118,7 @@ def deliver(pid: int, sleep_first: bool):
         if cur:  cur.close()
         if conn: conn.close()
 
-# ───────────────────────────  API  ─────────────────────────────
+# ──────────────────── API ────────────────────
 @router.post("/create")
 def create(data: dict, bg: BackgroundTasks):
     job_id, applicant_id = data.get("job_id"), data.get("applicant_id")
@@ -120,8 +130,7 @@ def create(data: dict, bg: BackgroundTasks):
     try:
         conn, cur = db(), None
         cur = conn.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
             SELECT %s,%s,%s,%s,NOW()
             WHERE NOT EXISTS (
@@ -135,16 +144,12 @@ def create(data: dict, bg: BackgroundTasks):
         )
         row = cur.fetchone()
         if not row:
-            conn.commit()
-            return {"message": "Ya existe una propuesta"}
-        pid = row[0]
-        conn.commit()                          # 👈 COMMIT EXPLÍCITO
+            conn.commit(); return {"message": "Ya existe una propuesta"}
+        pid = row[0]; conn.commit()
         logger.info(f"🆕 propuesta {pid} creada ({label})")
-
         if label == "automatic":
             bg.add_task(deliver, pid, True)
         return {"proposal_id": pid}
-
     except Exception:
         if conn: conn.rollback()
         logger.exception("create error")
@@ -152,7 +157,6 @@ def create(data: dict, bg: BackgroundTasks):
     finally:
         if cur:  cur.close()
         if conn: conn.close()
-
 
 @router.post("/cancel")
 def cancel(data: dict):
@@ -162,12 +166,10 @@ def cancel(data: dict):
 
     conn = cur = None
     try:
-        conn, cur = db(), None
-        cur = conn.cursor()
+        conn, cur = db(), None; cur = conn.cursor()
         cur.execute("SELECT status FROM proposals WHERE id=%s", (pid,))
         row = cur.fetchone()
-        if not row:
-            raise HTTPException(404, "No existe propuesta")
+        if not row: raise HTTPException(404, "No existe propuesta")
         if row[0] not in ("waiting", "pending"):
             raise HTTPException(400, "Estado no cancelable")
 
@@ -184,19 +186,16 @@ def cancel(data: dict):
         if cur:  cur.close()
         if conn: conn.close()
 
-
 @router.patch("/{pid}/send", dependencies=[Depends(get_current_admin)])
 def send_manual(pid: int):
     deliver(pid, False)
     return {"message": "enviada"}
 
-
 @router.delete("/{pid}", dependencies=[Depends(get_current_admin)])
 def delete_cancelled(pid: int):
     conn = cur = None
     try:
-        conn, cur = db(), None
-        cur = conn.cursor()
+        conn, cur = db(), None; cur = conn.cursor()
         cur.execute("SELECT status FROM proposals WHERE id=%s", (pid,))
         row = cur.fetchone()
         if not row: raise HTTPException(404, "No existe")
@@ -216,13 +215,11 @@ def delete_cancelled(pid: int):
         if cur:  cur.close()
         if conn: conn.close()
 
-
 @router.get("/", dependencies=[Depends(get_current_admin)])
 def list_proposals():
     conn = cur = None
     try:
-        conn, cur = db(), None
-        cur = conn.cursor()
+        conn, cur = db(), None; cur = conn.cursor()
         cur.execute(
             """
             SELECT
