@@ -2,21 +2,21 @@
 import os
 import traceback
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, Optional
 
-from fastapi import APIRouter, HTTPException, Depends, Request
-from fastapi.security import OAuth2PasswordBearer
-from jose import jwt, JWTError
 import psycopg2
 from dotenv import load_dotenv
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
 
 load_dotenv()
 
 # ────────────────────────────
 # JWT helpers
 # ────────────────────────────
-SECRET_KEY    = os.getenv("SECRET_KEY")
-ALGORITHM     = os.getenv("ALGORITHM", "HS256")
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
 
@@ -24,11 +24,7 @@ def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
     if not token:
         raise HTTPException(401, "Token no proporcionado")
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        sub = payload.get("sub")
-        if not sub:
-            raise HTTPException(401, "Token inválido o expirado")
-        return sub
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]).get("sub") or ""
     except JWTError:
         raise HTTPException(401, "Token inválido o expirado")
 
@@ -51,7 +47,7 @@ def get_db_connection():
 
 
 def get_admin_config() -> Dict[str, bool]:
-    conn, cur = None, None
+    conn = cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -67,12 +63,12 @@ def get_admin_config() -> Dict[str, bool]:
             conn.close()
 
 
-def get_admin_id(email: str) -> int | None:
-    conn, cur = None, None
+def get_admin_id(email: str) -> Optional[int]:
+    conn = cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute('SELECT id FROM "User" WHERE email = %s LIMIT 1;', (email,))
+        cur.execute('SELECT id FROM "User" WHERE email=%s LIMIT 1;', (email,))
         row = cur.fetchone()
         return row[0] if row else None
     finally:
@@ -92,24 +88,25 @@ router = APIRouter(
 )
 
 # ────────────────────────────
-# GET admin_offers
+# GET /admin_offers
 # ────────────────────────────
 @router.get("/admin_offers")
 def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
-    cfg               = get_admin_config()
-    show_admin_exp    = cfg.get("show_expired_admin_offers", False)
+    cfg = get_admin_config()
+    show_admin_exp = cfg.get("show_expired_admin_offers", False)
     show_employer_exp = cfg.get("show_expired_employer_offers", False)
 
     admin_id = get_admin_id(admin_sub)
 
-    conn, cur = None, None
+    conn = cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
             """
             SELECT id, title, description, requirements,
-                   "expirationDate", "userId", source, label
+                   "expirationDate", "userId", source, label,
+                   "contactEmail", "contactPhone"
               FROM public."Job"
           ORDER BY id DESC;
             """
@@ -120,7 +117,7 @@ def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
         offers = []
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
-            exp   = offer["expirationDate"]
+            exp = offer["expirationDate"]
 
             expired = False
             if exp:
@@ -149,20 +146,29 @@ def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
 
 
 # ────────────────────────────
-# PUT update-admin
+# PUT /update-admin
 # ────────────────────────────
 @router.put("/update-admin")
 async def update_admin_offer(request: Request):
-    body         = await request.json()
-    job_id       = int(body.get("id") or 0)
-    title        = body.get("title")
-    description  = body.get("description")
+    body = await request.json()
+
+    job_id = int(body.get("id") or 0)
+    title = body.get("title")
+    description = body.get("description")
     requirements = body.get("requirements", "")
-    expiration   = body.get("expirationDate")
-    user_id      = int(body.get("userId") or 0)
+    expiration = body.get("expirationDate")
+    user_id = int(body.get("userId") or 0)
+    contact_email = body.get("contactEmail")  # opcional
+    contact_phone = body.get("contactPhone")  # opcional
+    source = body.get("source", "admin")
+    label = body.get("label", "automatic")
 
     if not (job_id and title and description and user_id):
         raise HTTPException(400, "Faltan campos obligatorios")
+
+    # Si la oferta es del admin, debe tener un email de contacto
+    if source == "admin" and not contact_email:
+        raise HTTPException(400, "Las ofertas del administrador requieren contactEmail")
 
     exp_date = None
     if expiration:
@@ -173,11 +179,14 @@ async def update_admin_offer(request: Request):
 
     # Embedding OpenAI
     from openai import OpenAI
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    text = f"{title} {description} {requirements}"
-    embedding = client.embeddings.create(input=text, model="text-embedding-ada-002").data[0].embedding
 
-    conn, cur = None, None
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    text_to_embed = f"{title} {description} {requirements}"
+    embedding = client.embeddings.create(
+        input=text_to_embed, model="text-embedding-ada-002"
+    ).data[0].embedding
+
+    conn = cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -189,20 +198,47 @@ async def update_admin_offer(request: Request):
                    requirements     = %s,
                    "expirationDate" = %s,
                    "userId"         = %s,
+                   source           = %s,
+                   label            = %s,
+                   "contactEmail"   = %s,
+                   "contactPhone"   = %s,
                    embedding        = %s
              WHERE id = %s
          RETURNING id, title, description, requirements,
-                   "expirationDate", "userId", source, label;
+                   "expirationDate", "userId", source, label,
+                   "contactEmail", "contactPhone";
             """,
-            (title, description, requirements, exp_date, user_id, embedding, job_id),
+            (
+                title,
+                description,
+                requirements,
+                exp_date,
+                user_id,
+                source,
+                label,
+                contact_email,
+                contact_phone,
+                embedding,
+                job_id,
+            ),
         )
         upd = cur.fetchone()
         if not upd:
             raise HTTPException(404, "Oferta no encontrada")
         conn.commit()
 
-        keys = ["id","title","description","requirements",
-                "expirationDate","userId","source","label"]
+        keys = [
+            "id",
+            "title",
+            "description",
+            "requirements",
+            "expirationDate",
+            "userId",
+            "source",
+            "label",
+            "contactEmail",
+            "contactPhone",
+        ]
         offer = dict(zip(keys, upd))
         if offer["expirationDate"]:
             offer["expirationDate"] = offer["expirationDate"].isoformat()
@@ -220,41 +256,40 @@ async def update_admin_offer(request: Request):
 
 
 # ────────────────────────────
-# DELETE delete-admin  ⬅️  ***arreglado***
+# DELETE /delete-admin
 # ────────────────────────────
 @router.delete("/delete-admin")
 async def delete_admin_offer(request: Request):
     """
     Elimina una oferta **y** sus propuestas asociadas.
-
-    - Pone en *cancelled* las propuestas waiting | pending.
-    - Borra todas las propuestas canceladas.
-    - Luego borra la oferta.
     """
-    body   = await request.json()
+    body = await request.json()
     job_id = int(body.get("jobId") or 0)
     if not job_id:
         raise HTTPException(400, "jobId es requerido")
 
-    conn, cur = None, None
+    conn = cur = None
     try:
         conn = get_db_connection()
-        cur  = conn.cursor()
+        cur = conn.cursor()
 
-        # 1) cancelar propuestas activas
-        cur.execute("""
+        # 1) Cancelar propuestas activas
+        cur.execute(
+            """
             UPDATE proposals
-               SET status = 'cancelled',
-                   cancelled_at = NOW()
-             WHERE job_id = %s
-               AND status IN ('waiting','pending');
-        """, (job_id,))
+               SET status='cancelled', cancelled_at=NOW()
+             WHERE job_id=%s AND status IN ('waiting','pending');
+            """,
+            (job_id,),
+        )
 
-        # 2) eliminar todas las propuestas canceladas de ese job
-        cur.execute("DELETE FROM proposals WHERE job_id = %s AND status = 'cancelled';", (job_id,))
+        # 2) Eliminar propuestas canceladas
+        cur.execute(
+            "DELETE FROM proposals WHERE job_id=%s AND status='cancelled';", (job_id,)
+        )
 
-        # 3) borrar la oferta
-        cur.execute('DELETE FROM public."Job" WHERE id = %s RETURNING id;', (job_id,))
+        # 3) Borrar la oferta
+        cur.execute('DELETE FROM public."Job" WHERE id=%s RETURNING id;', (job_id,))
         if not cur.fetchone():
             raise HTTPException(404, "Oferta no encontrada")
 
@@ -263,7 +298,8 @@ async def delete_admin_offer(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        conn.rollback()
+        if conn:
+            conn.rollback()
         traceback.print_exc()
         raise HTTPException(500, f"Error al eliminar oferta: {e}")
     finally:
