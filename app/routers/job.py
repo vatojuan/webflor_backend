@@ -1,17 +1,17 @@
 # app/routers/job.py
 import os, traceback, requests, psycopg2
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
-from fastapi           import APIRouter, HTTPException, Request, Depends
-from fastapi.security  import OAuth2PasswordBearer
-from jose              import jwt, JWTError
-from dotenv            import load_dotenv
+from fastapi          import APIRouter, HTTPException, Request, Depends
+from fastapi.security import OAuth2PasswordBearer
+from jose             import jwt, JWTError
+from dotenv           import load_dotenv
 
 load_dotenv()
 router = APIRouter(tags=["job"])
 
-# ────────────────────────  Auth  ────────────────────────
+# ────────────────────────── Auth ──────────────────────────
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM  = os.getenv("ALGORITHM", "HS256")
 oauth2     = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
@@ -22,7 +22,7 @@ def get_current_admin_sub(token: str = Depends(oauth2)) -> str:
     except (JWTError, KeyError):
         raise HTTPException(401, "Token inválido o expirado")
 
-# ────────────────────────  DB  ──────────────────────────
+# ────────────────────────── DB ────────────────────────────
 def get_db_connection():
     return psycopg2.connect(
         dbname   = os.getenv("DBNAME"),
@@ -40,8 +40,8 @@ def get_admin_id_by_email(email: str) -> Optional[int]:
     cur.close(); conn.close()
     return row[0] if row else None
 
-# ─────────────────────  Embedding  ──────────────────────
-def generate_embedding(text: str) -> Optional[list]:
+# ────────────────────── OpenAI Embedding ──────────────────
+def generate_embedding(text: str) -> Optional[List[float]]:
     try:
         resp = requests.post(
             "https://api.openai.com/v1/embeddings",
@@ -57,21 +57,23 @@ def generate_embedding(text: str) -> Optional[list]:
         traceback.print_exc()
         return None
 
-# ───────────────────  util: columnas Job  ───────────────
-def job_has_column(col: str, cur) -> bool:
-    cur.execute("""
-        SELECT 1
-          FROM information_schema.columns
+# ──────────────────── helpers columna ────────────────────
+def job_has_column(cur, col: str) -> bool:
+    cur.execute(
+        """
+        SELECT 1 FROM information_schema.columns
          WHERE table_name = 'Job' AND column_name = %s
          LIMIT 1
-    """, (col,))
+        """, (col,)
+    )
     return bool(cur.fetchone())
 
-# ───────────────────  POST /create-admin  ───────────────
+# ────────────────────  POST /create-admin  ───────────────
 @router.post("/create-admin", status_code=201, dependencies=[Depends(oauth2)])
-async def create_admin_job(request: Request,
-                           admin_sub: str = Depends(get_current_admin_sub)):
-
+async def create_admin_job(
+    request: Request,
+    admin_sub: str = Depends(get_current_admin_sub)
+):
     data          = await request.json()
     title         = (data.get("title") or "").strip()
     description   = (data.get("description") or "").strip()
@@ -80,18 +82,19 @@ async def create_admin_job(request: Request,
     raw_user_id   =  data.get("userId")
     label         =  data.get("label",  "manual")
     source        =  data.get("source", "admin")
+
+    # opcionales
     is_paid       =  bool(data.get("isPaid", False))
+    contact_email =  data.get("contactEmail") or data.get("contact_email")
+    contact_phone =  data.get("contactPhone") or data.get("contact_phone")
 
-    # admite camel o snake
-    c_email = data.get("contactEmail")  or data.get("contact_email")
-    c_phone = data.get("contactPhone")  or data.get("contact_phone")
-
+    # validaciones mínimas
     if not title or not description:
         raise HTTPException(400, "title y description son obligatorios")
-    if source == "admin" and not c_email:
+    if source == "admin" and not contact_email:
         raise HTTPException(400, "Las ofertas del administrador requieren contactEmail")
 
-    # expirationDate → datetime|None
+    # expirationDate → datetime (o None)
     exp_date = None
     if expiration:
         try:
@@ -111,45 +114,36 @@ async def create_admin_job(request: Request,
 
     conn = get_db_connection(); cur = conn.cursor()
     try:
-        # ¿qué nombres existen en la tabla?
-        has_snake = job_has_column("contact_email", cur)
-        has_camel = job_has_column("contactEmail",  cur)
+        # ── inspeccionamos columnas opcionales ──
+        has_is_paid      = job_has_column(cur, "is_paid")
+        has_snake_contact= job_has_column(cur, "contact_email")
+        has_camel_contact= job_has_column(cur, "contactEmail")
 
-        if has_snake or has_camel:
-            email_col  = "contact_email"  if has_snake else "contactEmail"
-            phone_col  = "contact_phone"  if has_snake else "contactPhone"
-            cur.execute(
-                f"""
-                INSERT INTO "Job"
-                   (title, description, requirements, "expirationDate",
-                    "userId", embedding, label, source, is_paid,
-                    {email_col}, {phone_col})
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                RETURNING id, {email_col}, {phone_col};
-                """,
-                (
-                    title, description, requirements, exp_date,
-                    user_id, embedding, label, source, is_paid,
-                    c_email, c_phone
-                )
-            )
-        else:  # tabla sin columnas de contacto → insert legacy
-            cur.execute(
-                """
-                INSERT INTO "Job"
-                   (title, description, requirements, "expirationDate",
-                    "userId", embedding, label, source, is_paid)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                RETURNING id;
-                """,
-                (
-                    title, description, requirements, exp_date,
-                    user_id, embedding, label, source, is_paid
-                )
-            )
+        email_col = None; phone_col = None
+        if has_snake_contact:
+            email_col, phone_col = "contact_email", "contact_phone"
+        elif has_camel_contact:
+            email_col, phone_col = "contactEmail", "contactPhone"
 
-        row = cur.fetchone()
-        job_id = row[0]
+        # ── construimos query dinámica ──
+        fields  = [
+            "title", "description", "requirements", '"expirationDate"',
+            '"userId"', "embedding", "label", "source"
+        ]
+        values  = [
+            title, description, requirements, exp_date,
+            user_id, embedding, label, source
+        ]
+
+        if has_is_paid:
+            fields.append("is_paid"); values.append(is_paid)
+        if email_col:
+            fields.append(email_col);  values.append(contact_email)
+            fields.append(phone_col);  values.append(contact_phone)
+
+        sql = f'INSERT INTO "Job" ({", ".join(fields)}) VALUES ({", ".join(["%s"]*len(fields))}) RETURNING id;'
+        cur.execute(sql, tuple(values))
+        job_id = cur.fetchone()[0]
         conn.commit()
 
     except Exception as e:
@@ -159,11 +153,10 @@ async def create_admin_job(request: Request,
     finally:
         cur.close(); conn.close()
 
+    # devolvemos lo grabado para que el front lo use al instante
     return {
         "message": "Oferta creada",
         "jobId":   job_id,
-        # si la tabla guardó email/teléfono los reenviamos, así el
-        # frontend puede reflejarlos inmediatamente
-        "contactEmail": row[1] if len(row) > 1 else c_email,
-        "contactPhone": row[2] if len(row) > 2 else c_phone
+        "contactEmail": contact_email,
+        "contactPhone": contact_phone
     }
