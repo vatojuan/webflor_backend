@@ -11,9 +11,7 @@ from jose import jwt, JWTError
 
 load_dotenv()
 
-# ══════════════════════════════════════
-# JWT helpers
-# ══════════════════════════════════════
+# ───────────────────  JWT  ───────────────────
 SECRET_KEY    = os.getenv("SECRET_KEY")
 ALGORITHM     = os.getenv("ALGORITHM", "HS256")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
@@ -28,18 +26,16 @@ def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
         raise HTTPException(401, "Token inválido o expirado")
 
 
-# ══════════════════════════════════════
-# DB helpers
-# ══════════════════════════════════════
+# ───────────────────  DB  ───────────────────
 def get_db_connection():
     try:
         return psycopg2.connect(
-            dbname=os.getenv("DBNAME"),
-            user=os.getenv("USER"),
-            password=os.getenv("PASSWORD"),
-            host=os.getenv("HOST"),
-            port=int(os.getenv("DB_PORT", 5432)),
-            sslmode="require",
+            dbname   = os.getenv("DBNAME"),
+            user     = os.getenv("USER"),
+            password = os.getenv("PASSWORD"),
+            host     = os.getenv("HOST"),
+            port     = int(os.getenv("DB_PORT", 5432)),
+            sslmode  = "require",
         )
     except Exception as e:
         raise HTTPException(500, f"Error conexión BD: {e}")
@@ -73,18 +69,16 @@ def get_admin_id(email: str) -> Optional[int]:
         if conn: conn.close()
 
 
-# ══════════════════════════════════════
-# Router
-# ══════════════════════════════════════
+# ───────────────────  Router  ───────────────────
 router = APIRouter(
     prefix="/api/job",
     tags=["job_admin"],
     dependencies=[Depends(get_current_admin)],
 )
 
-# ══════════════════════════════════════
+# ════════════════════════════════════════
 # GET /admin_offers
-# ══════════════════════════════════════
+# ════════════════════════════════════════
 @router.get("/admin_offers")
 def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
     cfg               = get_admin_config()
@@ -101,7 +95,10 @@ def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
             """
             SELECT id, title, description, requirements,
                    "expirationDate", "userId", source, label,
-                   contact_email, contact_phone                 -- ⬅️  snake_case
+                   contact_email  AS "contactEmail",   -- camel alias
+                   contact_phone  AS "contactPhone",
+                   contact_email,                      -- snake (por si acaso)
+                   contact_phone
               FROM public."Job"
           ORDER BY id DESC
             """
@@ -137,28 +134,30 @@ def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
         if conn: conn.close()
 
 
-# ══════════════════════════════════════
+# ════════════════════════════════════════
 # PUT /update-admin
-# ══════════════════════════════════════
+# ════════════════════════════════════════
 @router.put("/update-admin")
 async def update_admin_offer(request: Request):
     body = await request.json()
 
-    job_id        = int(body.get("id") or 0)
-    title         = body.get("title")
-    description   = body.get("description")
-    requirements  = body.get("requirements", "")
-    expiration    = body.get("expirationDate")
-    user_id       = int(body.get("userId") or 0)
-    contact_email = body.get("contactEmail")   # opcional
-    contact_phone = body.get("contactPhone")   # opcional
-    source        = body.get("source", "admin")
-    label         = body.get("label",  "automatic")
+    job_id       = int(body.get("id") or 0)
+    title        = body.get("title")
+    description  = body.get("description")
+    requirements = body.get("requirements", "")
+    expiration   = body.get("expirationDate")
+    user_id      = int(body.get("userId") or 0)
+
+    # admite camel o snake
+    contact_email = body.get("contactEmail") or body.get("contact_email")
+    contact_phone = body.get("contactPhone") or body.get("contact_phone")
+
+    source = body.get("source", "admin")
+    label  = body.get("label",  "automatic")
 
     if not (job_id and title and description and user_id):
         raise HTTPException(400, "Faltan campos obligatorios")
 
-    # Las ofertas del admin siempre deben llevar e-mail de contacto
     if source == "admin" and not contact_email:
         raise HTTPException(400, "Las ofertas del administrador requieren contactEmail")
 
@@ -169,12 +168,12 @@ async def update_admin_offer(request: Request):
         except ValueError:
             raise HTTPException(400, "Formato de fecha inválido")
 
-    # ── OpenAI embedding ──────────────────────────────────────────
+    # OpenAI embedding
     from openai import OpenAI
     client     = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    text_embed = f"{title} {description} {requirements}"
     embedding  = client.embeddings.create(
-        input=text_embed, model="text-embedding-ada-002"
+        input=f"{title} {description} {requirements}",
+        model="text-embedding-ada-002"
     ).data[0].embedding
 
     conn = cur = None
@@ -191,13 +190,14 @@ async def update_admin_offer(request: Request):
                    "userId"         = %s,
                    source           = %s,
                    label            = %s,
-                   contact_email    = %s,            -- ⬅️  snake_case persistencia
+                   contact_email    = %s,
                    contact_phone    = %s,
                    embedding        = %s
              WHERE id = %s
          RETURNING id, title, description, requirements,
                    "expirationDate", "userId", source, label,
-                   contact_email, contact_phone
+                   contact_email  AS "contactEmail",
+                   contact_phone  AS "contactPhone"
             """,
             (
                 title,
@@ -219,16 +219,8 @@ async def update_admin_offer(request: Request):
         conn.commit()
 
         keys = [
-            "id",
-            "title",
-            "description",
-            "requirements",
-            "expirationDate",
-            "userId",
-            "source",
-            "label",
-            "contactEmail",
-            "contactPhone",
+            "id","title","description","requirements","expirationDate",
+            "userId","source","label","contactEmail","contactPhone"
         ]
         offer = dict(zip(keys, upd))
         if offer["expirationDate"]:
@@ -244,14 +236,13 @@ async def update_admin_offer(request: Request):
         if conn: conn.close()
 
 
-# ══════════════════════════════════════
+# ════════════════════════════════════════
 # DELETE /delete-admin
-# ══════════════════════════════════════
+# ════════════════════════════════════════
 @router.delete("/delete-admin")
 async def delete_admin_offer(request: Request):
     """
-    Elimina una oferta **y** todas las propuestas asociadas
-    (las waiting|pending se marcan canceladas antes de borrar).
+    Elimina la oferta y las propuestas asociadas.
     """
     body   = await request.json()
     job_id = int(body.get("jobId") or 0)
@@ -263,7 +254,6 @@ async def delete_admin_offer(request: Request):
         conn = get_db_connection()
         cur  = conn.cursor()
 
-        # 1) cancelar propuestas activas
         cur.execute(
             """
             UPDATE proposals
@@ -272,13 +262,10 @@ async def delete_admin_offer(request: Request):
             """,
             (job_id,),
         )
-
-        # 2) eliminar canceladas
         cur.execute(
-            "DELETE FROM proposals WHERE job_id=%s AND status='cancelled';", (job_id,)
+            "DELETE FROM proposals WHERE job_id=%s AND status='cancelled';",
+            (job_id,),
         )
-
-        # 3) borrar la oferta
         cur.execute('DELETE FROM public."Job" WHERE id=%s RETURNING id;', (job_id,))
         if not cur.fetchone():
             raise HTTPException(404, "Oferta no encontrada")
@@ -288,8 +275,7 @@ async def delete_admin_offer(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         traceback.print_exc()
         raise HTTPException(500, f"Error al eliminar oferta: {e}")
     finally:
