@@ -1,16 +1,20 @@
 # app/routers/proposal.py
-import os, time, logging, smtplib, psycopg2
+import os
+import time
+import logging
+import smtplib
+import psycopg2
 from email.message import EmailMessage
-from dotenv          import load_dotenv
-from fastapi          import APIRouter, HTTPException, Depends, BackgroundTasks
+from dotenv import load_dotenv
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
-from jose             import jwt, JWTError
-from app.database     import engine
+from jose import jwt, JWTError
+from app.database import engine
 
 load_dotenv()
 
 SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM  = os.getenv("ALGORITHM", "HS256")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
 AUTO_DELAY = int(os.getenv("AUTO_PROPOSAL_DELAY", "300"))  # 5 min por defecto
 
 logging.basicConfig(
@@ -21,9 +25,7 @@ logger = logging.getLogger(__name__)
 router        = APIRouter(prefix="/api/proposals", tags=["proposals"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
-# ════════════════════════════════════════════════════════════════
-# Helpers ────────────────────────────────────────────────────────
-# ════════════════════════════════════════════════════════════════
+
 def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
     if not token:
         raise HTTPException(401, "Token no proporcionado")
@@ -39,9 +41,6 @@ def db() -> psycopg2.extensions.connection:
     return conn
 
 
-# ════════════════════════════════════════════════════════════════
-# E-mail & WhatsApp senders
-# ════════════════════════════════════════════════════════════════
 def _smtp_cfg():
     return (
         os.getenv("SMTP_SERVER"),
@@ -64,32 +63,24 @@ def send_mail(dest: str, subj: str, body: str, cv: str | None = None):
 
 
 def send_whatsapp(phone: str | None, txt: str):
-    # Sustituir por integración real si se dispone
     if phone:
         logger.info(f"📲 WhatsApp → {phone}: {txt}")
 
 
-# ════════════════════════════════════════════════════════════════
-# Background delivery
-# ════════════════════════════════════════════════════════════════
 def deliver(pid: int, sleep_first: bool):
-    """
-    Envía la propuesta.  
-    • Cuando *sleep_first* == True se utiliza para envíos automáticos (espera AUTO_DELAY).  
-    • Cuando *sleep_first* == False se utiliza para envíos manuales (sin espera).
-    """
     if sleep_first:
         logger.info(f"⏳ task {pid}: sleep {AUTO_DELAY}s")
         time.sleep(AUTO_DELAY)
 
     conn = cur = None
     try:
-        conn, cur = db(), None
+        conn = db()
         cur = conn.cursor()
 
-        # ── 1) Estado actual ───────────────────────────────────────
+        # 1) Estado actual
         cur.execute(
-            "SELECT status, job_id, applicant_id FROM proposals WHERE id=%s", (pid,)
+            "SELECT status, job_id, applicant_id FROM proposals WHERE id=%s",
+            (pid,),
         )
         row = cur.fetchone()
         if not row:
@@ -102,34 +93,35 @@ def deliver(pid: int, sleep_first: bool):
         if not sleep_first and status != "pending":
             raise HTTPException(400, "Solo proposals en pending")
 
-        # ── 2) Datos de la oferta ──────────────────────────────────
+        # 2) Datos de la oferta
         cur.execute('SELECT * FROM "Job" WHERE id=%s', (job_id,))
         jrow = cur.fetchone()
         if not jrow:
             logger.error(f"Job {job_id} no hallado")
             return
-        jcols             = [d[0] for d in cur.description]
-        job               = dict(zip(jcols, jrow))
-        title             = job.get("title")
-        source            = job.get("source")
-        owner_id          = job.get("userId") or job.get("user_id")
-        contact_email     = job.get("contactEmail") or job.get("contact_email")
-        contact_phone     = job.get("contactPhone") or job.get("contact_phone")
+        jcols = [d[0] for d in cur.description]
+        job = dict(zip(jcols, jrow))
+        title         = job.get("title")
+        source        = job.get("source")
+        owner_id      = job.get("user_id") or job.get("userId")
+        contact_email = job.get("contact_email")
+        contact_phone = job.get("contact_phone")
 
-        # ── 3) Datos del postulante ────────────────────────────────
+        # 3) Datos del postulante
         cur.execute(
-            'SELECT name, email, "cvUrl" FROM "User" WHERE id=%s', (applicant_id,)
+            'SELECT name, email, "cvUrl" FROM "User" WHERE id=%s',
+            (applicant_id,),
         )
         a_name, a_mail, cv_url = cur.fetchone()
 
-        # ── 4) Destino final ───────────────────────────────────────
+        # 4) Destino final
         if source == "admin":
             dest_mail, dest_phone = contact_email, contact_phone
-        else:  # oferta creada por empleador
+        else:
             cur.execute('SELECT email, phone FROM "User" WHERE id=%s', (owner_id,))
             dest_mail, dest_phone = cur.fetchone()
 
-        # ── 5) Validación de e-mail ────────────────────────────────
+        # 5) Validación de e-mail
         if not dest_mail:
             logger.warning("❗ Sin e-mail destino: propuesta queda en error_email")
             cur.execute(
@@ -145,7 +137,7 @@ def deliver(pid: int, sleep_first: bool):
             conn.commit()
             return
 
-        # ── 6) Envío ───────────────────────────────────────────────
+        # 6) Envío
         subj = f"Nueva propuesta – {title}"
         body = (
             f"Hola,\n\n"
@@ -172,9 +164,10 @@ def deliver(pid: int, sleep_first: bool):
 
         send_whatsapp(dest_phone, f"Nueva propuesta para «{title}».")
 
-        # ── 7) Marcar como enviada ─────────────────────────────────
+        # 7) Marcar como enviada
         cur.execute(
-            "UPDATE proposals SET status='sent', sent_at=NOW() WHERE id=%s", (pid,)
+            "UPDATE proposals SET status='sent', sent_at=NOW() WHERE id=%s",
+            (pid,),
         )
         conn.commit()
         logger.info(f"✅ propuesta {pid} → sent")
@@ -190,19 +183,16 @@ def deliver(pid: int, sleep_first: bool):
             conn.close()
 
 
-# ════════════════════════════════════════════════════════════════
-# End-points
-# ════════════════════════════════════════════════════════════════
 @router.post("/create")
 def create(data: dict, bg: BackgroundTasks):
     job_id, applicant_id = data.get("job_id"), data.get("applicant_id")
-    label                = data.get("label", "automatic")
+    label = data.get("label", "automatic")
     if not (job_id and applicant_id):
         raise HTTPException(400, "Faltan campos")
 
     conn = cur = None
     try:
-        conn, cur = db(), None
+        conn = db()
         cur = conn.cursor()
         cur.execute(
             """
@@ -253,7 +243,7 @@ def cancel(data: dict):
 
     conn = cur = None
     try:
-        conn, cur = db(), None
+        conn = db()
         cur = conn.cursor()
         cur.execute("SELECT status FROM proposals WHERE id=%s", (pid,))
         row = cur.fetchone()
@@ -293,7 +283,7 @@ def send_manual(pid: int):
 def delete_cancelled(pid: int):
     conn = cur = None
     try:
-        conn, cur = db(), None
+        conn = db()
         cur = conn.cursor()
         cur.execute("SELECT status FROM proposals WHERE id=%s", (pid,))
         row = cur.fetchone()
@@ -324,7 +314,7 @@ def delete_cancelled(pid: int):
 def list_proposals():
     conn = cur = None
     try:
-        conn, cur = db(), None
+        conn = db()
         cur = conn.cursor()
         cur.execute(
             """
@@ -336,13 +326,13 @@ def list_proposals():
               p.sent_at     AT TIME ZONE 'UTC' AT TIME ZONE 'America/Argentina/Buenos_Aires' AS sent_at,
               p.cancelled_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Argentina/Buenos_Aires' AS cancelled_at,
               p.notes,
-              j.title  AS job_title,
-              j.source AS proposal_source,
-              j."contactEmail" AS job_contact_email,
-              u.name   AS applicant_name,
-              u.email  AS applicant_email
+              j.title            AS job_title,
+              j.source           AS proposal_source,
+              j.contact_email    AS job_contact_email,
+              u.name             AS applicant_name,
+              u.email            AS applicant_email
             FROM proposals p
-            JOIN "Job"  j ON p.job_id      = j.id
+            JOIN "Job" j  ON p.job_id      = j.id
             JOIN "User" u ON p.applicant_id = u.id
             ORDER BY p.created_at DESC
             """
