@@ -1,25 +1,22 @@
 # app/routers/proposal.py
-import os
-import time
-import logging
-import smtplib
-import psycopg2
+import os, time, logging, smtplib, psycopg2
 from email.message import EmailMessage
 from datetime import timedelta
+from typing       import Set
 
-from dotenv           import load_dotenv
-from fastapi          import APIRouter, HTTPException, Depends, BackgroundTasks
-from fastapi.security import OAuth2PasswordBearer
-from jose             import jwt, JWTError
+from dotenv               import load_dotenv
+from fastapi              import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi.security     import OAuth2PasswordBearer
+from jose                 import jwt, JWTError
 
-from app.database import engine   # ← tu engine SQL-Alchemy
+from app.database         import engine   # SQL-Alchemy engine
 
 load_dotenv()
 
-# ────────────────────────────── Config ──────────────────────────────
+# ───────────────────────── Configuración ──────────────────────────
 SECRET_KEY  = os.getenv("SECRET_KEY")
 ALGORITHM   = os.getenv("ALGORITHM", "HS256")
-AUTO_DELAY  = int(os.getenv("AUTO_PROPOSAL_DELAY", "300"))           # 5 min por defecto
+AUTO_DELAY  = int(os.getenv("AUTO_PROPOSAL_DELAY", "300"))  # 5 min
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
@@ -28,9 +25,7 @@ logger = logging.getLogger(__name__)
 router        = APIRouter(prefix="/api/proposals", tags=["proposals"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
-# -------------------------------------------------------------------
-# Helpers de auth & DB
-# -------------------------------------------------------------------
+# ───────────────────── Auth & DB helpers ──────────────────────────
 def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
     if not token:
         raise HTTPException(401, "Token no proporcionado")
@@ -44,60 +39,48 @@ def db() -> psycopg2.extensions.connection:
     conn.autocommit = False
     return conn
 
-# -------------------------------------------------------------------
-# Envío de e-mail y WhatsApp
-# -------------------------------------------------------------------
-def _smtp_cfg() -> tuple[str, int, str, str]:
-    """
-    Devuelve host, puerto, usuario, contraseña.
-    Si el puerto es 465 se entenderá como SMTP SSL; cualquier otro usa STARTTLS.
-    """
+# ───────────────────── SMTP helpers ───────────────────────────────
+def _smtp_cfg():
     return (
         os.getenv("SMTP_SERVER", ""),
         int(os.getenv("SMTP_PORT", "587")),
-        os.getenv("SMTP_USER", ""),
-        os.getenv("SMTP_PASS", ""),
+        os.getenv("SMTP_USER",  ""),
+        os.getenv("SMTP_PASS",  ""),
     )
 
 def send_mail(dest: str, subj: str, body: str, cv: str | None = None):
-    """Envío robusto de correo: EHLO → TLS (o SSL) → LOGIN → SEND → QUIT."""
     host, port, user, pwd = _smtp_cfg()
+    if not all([host, port, user, pwd]):
+        raise RuntimeError("Config SMTP incompleta")
+
     msg = EmailMessage()
     msg["From"], msg["To"], msg["Subject"] = user, dest, subj
     msg.set_content(body + (f"\n\nCV: {cv}" if cv else ""))
 
-    if not all([host, port, user, pwd]):
-        raise RuntimeError("Config SMTP incompleta")
-
-    try:
-        if port == 465:
-            smtp = smtplib.SMTP_SSL(host, port, timeout=20)
-        else:
-            smtp = smtplib.SMTP(host, port, timeout=20)
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.ehlo()
-
-        smtp.login(user, pwd)
-        smtp.send_message(msg)
-        smtp.quit()
-        logger.info(f"✉️  Mail enviado → {dest}")
-    except Exception as e:
-        logger.exception(f"send_mail error: {e}")
-        raise
+    smtp = smtplib.SMTP_SSL(host, port, timeout=20) if port == 465 else smtplib.SMTP(host, port, timeout=20)
+    if port != 465:
+        smtp.ehlo(); smtp.starttls(); smtp.ehlo()
+    smtp.login(user, pwd)
+    smtp.send_message(msg)
+    smtp.quit()
+    logger.info(f"✉️  Mail enviado → {dest}")
 
 def send_whatsapp(phone: str | None, txt: str):
     if phone:
         logger.info(f"📲 WhatsApp → {phone}: {txt}")
 
-# -------------------------------------------------------------------
-# Lógica de entrega (background o manual)
-# -------------------------------------------------------------------
+# ───────────────────── Utilidades tabla Job ───────────────────────
+def job_columns(cur) -> Set[str]:
+    """Devuelve el set de columnas reales de la tabla Job."""
+    cur.execute("""
+        SELECT column_name
+          FROM information_schema.columns
+         WHERE table_schema='public' AND table_name='Job'
+    """)
+    return {c[0] for c in cur.fetchall()}
+
+# ───────────────────── Lógica de entrega ──────────────────────────
 def deliver(pid: int, sleep_first: bool):
-    """
-    • Si *sleep_first* es True: espera AUTO_DELAY y envía (modo automático).
-    • Si es False: envía inmediatamente (botón manual).
-    """
     if sleep_first:
         logger.info(f"⏳ task {pid}: sleep {timedelta(seconds=AUTO_DELAY)}")
         time.sleep(AUTO_DELAY)
@@ -107,7 +90,7 @@ def deliver(pid: int, sleep_first: bool):
         conn, cur = db(), None
         cur = conn.cursor()
 
-        # 1) Estado actual de la propuesta
+        # 1) Estado actual
         cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id=%s", (pid,))
         row = cur.fetchone()
         if not row:
@@ -118,7 +101,7 @@ def deliver(pid: int, sleep_first: bool):
         if (not sleep_first) and status != "pending":
             raise HTTPException(400, "Solo proposals en pending")
 
-        # 2) Datos de la oferta (soportamos snake & camel)
+        # 2) Datos de la oferta
         cur.execute('SELECT * FROM "Job" WHERE id=%s', (job_id,))
         jrow = cur.fetchone()
         if not jrow:
@@ -131,53 +114,43 @@ def deliver(pid: int, sleep_first: bool):
         contact_email = job.get("contact_email") or job.get("contactEmail")
         contact_phone = job.get("contact_phone") or job.get("contactPhone")
 
-        # 3) Datos del postulante
+        # 3) Datos postulante
         cur.execute('SELECT name, email, "cvUrl" FROM "User" WHERE id=%s', (applicant_id,))
         a_name, a_mail, cv_url = cur.fetchone()
 
-        # 4) Destino final
+        # 4) Destino
         if source == "admin":
             dest_mail, dest_phone = contact_email, contact_phone
         else:
             cur.execute('SELECT email, phone FROM "User" WHERE id=%s', (owner_id,))
             dest_mail, dest_phone = cur.fetchone()
 
-        # 5) Validación de e-mail
+        # 5) Validación mail
         if not dest_mail:
-            logger.warning("❗ Sin e-mail destino: propuesta queda en error_email")
             cur.execute("""
                 UPDATE proposals
-                   SET status='error_email',
-                       cancelled_at = NOW(),
-                       notes = 'Sin e-mail de contacto'
+                   SET status='error_email', cancelled_at=NOW(), notes='Sin e-mail de contacto'
                  WHERE id=%s
             """, (pid,))
             conn.commit()
-            return
+            logger.warning("❗ Sin e-mail destino"); return
 
         # 6) Envío
         subj = f"Nueva propuesta – {title}"
-        body = (f"Hola,\n\n"
-                f"{a_name} se postuló a «{title}».\n"
-                f"Mail candidato: {a_mail}\n")
+        body = f"Hola,\n\n{a_name} se postuló a «{title}».\nMail candidato: {a_mail}\n"
 
         try:
             send_mail(dest_mail, subj, body, cv_url)
         except Exception:
-            # ya logueado en send_mail
             cur.execute("""
                 UPDATE proposals
-                   SET status='error_email',
-                       cancelled_at = NOW(),
-                       notes = 'Fallo en el envío de e-mail'
+                   SET status='error_email', cancelled_at=NOW(), notes='Fallo en el envío de e-mail'
                  WHERE id=%s
             """, (pid,))
             conn.commit()
             return
 
         send_whatsapp(dest_phone, f"Nueva propuesta para «{title}».")
-
-        # 7) Marcar como enviada
         cur.execute("UPDATE proposals SET status='sent', sent_at=NOW() WHERE id=%s", (pid,))
         conn.commit()
         logger.info(f"✅ propuesta {pid} → sent")
@@ -189,9 +162,7 @@ def deliver(pid: int, sleep_first: bool):
         if cur:  cur.close()
         if conn: conn.close()
 
-# -------------------------------------------------------------------
-# End-points
-# -------------------------------------------------------------------
+# ───────────────────── End-points create / cancel / etc. ───────────
 @router.post("/create")
 def create(data: dict, bg: BackgroundTasks):
     job_id, applicant_id = data.get("job_id"), data.get("applicant_id")
@@ -297,7 +268,15 @@ def list_proposals():
     try:
         conn, cur = db(), None
         cur = conn.cursor()
-        cur.execute("""
+
+        cols = job_columns(cur)
+        email_col = "contact_email"  if "contact_email"  in cols else ("\"contactEmail\""  if "contactEmail"  in cols else None)
+        phone_col = "contact_phone"  if "contact_phone"  in cols else ("\"contactPhone\""  if "contactPhone"  in cols else None)
+
+        email_expr = f"COALESCE(j.{email_col}) AS job_contact_email" if email_col else "NULL AS job_contact_email"
+        phone_expr = f"COALESCE(j.{phone_col}) AS job_contact_phone" if phone_col else "NULL AS job_contact_phone"
+
+        cur.execute(f"""
             SELECT
               p.id, p.label, p.status,
               p.created_at  AT TIME ZONE 'UTC' AT TIME ZONE 'America/Argentina/Buenos_Aires' AS created_at,
@@ -306,7 +285,8 @@ def list_proposals():
               p.notes,
               j.title  AS job_title,
               j.source AS proposal_source,
-              COALESCE(j.contact_email, j."contactEmail") AS job_contact_email,
+              {email_expr},
+              {phone_expr},
               u.name   AS applicant_name,
               u.email  AS applicant_email
             FROM proposals p
@@ -314,8 +294,9 @@ def list_proposals():
             JOIN "User" u ON p.applicant_id = u.id
             ORDER BY p.created_at DESC
         """)
-        cols = [d[0] for d in cur.description]
-        return {"proposals": [dict(zip(cols, r)) for r in cur.fetchall()]}
+        col_names = [d[0] for d in cur.description]
+        return {"proposals": [dict(zip(col_names, r)) for r in cur.fetchall()]}
+
     except Exception:
         logger.exception("list error")
         raise HTTPException(500, "Error interno")
