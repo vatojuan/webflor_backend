@@ -63,7 +63,6 @@ def db() -> psycopg2.extensions.connection:
 
 # ───────────────────────── SMTP helpers ───────────────────────────
 def _smtp_cfg() -> Tuple[str, int, str, str]:
-    # Coincide con tu .env: SMTP_HOST / SMTP_PORT
     return (
         os.getenv("SMTP_HOST", ""),
         int(os.getenv("SMTP_PORT", "587")),
@@ -74,8 +73,7 @@ def _smtp_cfg() -> Tuple[str, int, str, str]:
 
 def _check_mx(address: str) -> None:
     """
-    Opcional: verifica que el dominio destino tenga registro MX.
-    Sólo advertencia en logs.
+    Solo avisos en logs si no hay MX.
     """
     domain = address.split("@")[-1]
     try:
@@ -86,9 +84,6 @@ def _check_mx(address: str) -> None:
 
 def send_mail(dest: str, subj: str, body: str,
               cv: Optional[str] = None) -> None:
-    """
-    Envío robusto de correo. Si arroja excepción, se marcará error_email.
-    """
     host, port, user, pwd = _smtp_cfg()
     if not all([host, port, user, pwd]):
         raise RuntimeError("Variables SMTP* incompletas")
@@ -102,7 +97,6 @@ def send_mail(dest: str, subj: str, body: str,
     msg.set_content(body + (f"\n\nCV: {cv}" if cv else ""))
 
     logger.info(f"📤  Conectando a SMTP {host}:{port} …")
-
     if port == 465:
         smtp = smtplib.SMTP_SSL(host, port, timeout=SMTP_TIMEOUT)
     else:
@@ -157,9 +151,11 @@ def deliver(pid: int, sleep_first: bool) -> None:
             return
         status, job_id, applicant_id = row
 
+        # El sleep-first solo aplica si estaba en 'waiting'
         if sleep_first and status != "waiting":
             logger.info("Propuesta %d dejó waiting (%s)", pid, status)
             return
+        # El manual send solo puede ejecutarse si sigue en 'pending'
         if not sleep_first and status != "pending":
             raise HTTPException(400, "Solo proposals en pending")
 
@@ -250,9 +246,8 @@ def deliver(pid: int, sleep_first: bool) -> None:
 def create(data: dict, bg: BackgroundTasks):
     job_id       = data.get("job_id")
     applicant_id = data.get("applicant_id")
-
-    # ahora por defecto, si no envían label => 'pending'
-    label = data.get("label") or "pending"
+    # Por defecto, si no envían label, lo consideramos 'pending'
+    label        = data.get("label") or "pending"
 
     if not (job_id and applicant_id):
         raise HTTPException(400, "Faltan campos")
@@ -283,7 +278,7 @@ def create(data: dict, bg: BackgroundTasks):
         conn.commit()
         logger.info("🆕 propuesta %d creada (%s)", pid, label)
 
-        # sólo las 'automatic' disparan deliver
+        # Solo las 'automatic' disparan deliver
         if label == "automatic":
             bg.add_task(deliver, pid, True)
 
@@ -343,7 +338,10 @@ def cancel(data: dict):
 
 @router.patch("/{pid}/send", dependencies=[Depends(get_current_admin)])
 def send_manual(pid: int):
-    deliver(pid, False)
+    """
+    Envío manual inmediato de una propuesta que esté en 'pending'.
+    """
+    deliver(pid, sleep_first=False)
     return {"message": "enviada"}
 
 
@@ -386,6 +384,7 @@ def list_proposals():
         conn = db()
         cur  = conn.cursor()
 
+        # Detectar dinámicamente columnas de e-mail / phone en Job
         cols      = job_columns(cur)
         email_col = ("contact_email"    if "contact_email"    in cols
                      else "\"contactEmail\"" if "contactEmail" in cols
@@ -419,8 +418,8 @@ def list_proposals():
               u.name         AS applicant_name,
               u.email        AS applicant_email
             FROM proposals p
-            JOIN "Job"  j ON p.job_id      = j.id
-            JOIN "User" u ON p.applicant_id = u.id
+            JOIN "Job"   j ON p.job_id      = j.id
+            JOIN "User"  u ON p.applicant_id = u.id
             ORDER BY p.created_at DESC
         """
         logger.debug("list_proposals SQL → %s", sql)
