@@ -75,7 +75,7 @@ def _smtp_cfg() -> Tuple[str, int, str, str]:
 def _check_mx(address: str) -> None:
     """
     Opcional: verifica que el dominio destino tenga registro MX.
-    Solo advertencia en logs.
+    Sólo advertencia en logs.
     """
     domain = address.split("@")[-1]
     try:
@@ -87,7 +87,7 @@ def _check_mx(address: str) -> None:
 def send_mail(dest: str, subj: str, body: str,
               cv: Optional[str] = None) -> None:
     """
-    Envío robusto de correo. Al lanzar excepción, caller debe marcar error_email.
+    Envío robusto de correo. Si arroja excepción, se marcará error_email.
     """
     host, port, user, pwd = _smtp_cfg()
     if not all([host, port, user, pwd]):
@@ -114,7 +114,6 @@ def send_mail(dest: str, subj: str, body: str,
     smtp.login(user, pwd)
     smtp.send_message(msg)
     smtp.quit()
-
     logger.info(f"✉️  Mail enviado correctamente a {dest}")
 
 
@@ -145,8 +144,7 @@ def deliver(pid: int, sleep_first: bool) -> None:
         logger.info("⏳ task %d: sleep %s", pid, timedelta(seconds=AUTO_DELAY))
         time.sleep(AUTO_DELAY)
 
-    conn = None
-    cur  = None
+    conn = cur = None
     try:
         conn = db()
         cur  = conn.cursor()
@@ -229,7 +227,7 @@ def deliver(pid: int, sleep_first: bool) -> None:
         # 7) WhatsApp y marcar como enviada
         send_whatsapp(dest_phone, f"Nueva propuesta para «{title}».")
         cur.execute(
-            "UPDATE proposals SET status='sent', sent_at=NOW() WHERE id = %s",
+            "UPDATE proposals SET status='sent', sent_at = NOW() WHERE id = %s",
             (pid,)
         )
         conn.commit()
@@ -252,16 +250,18 @@ def deliver(pid: int, sleep_first: bool) -> None:
 def create(data: dict, bg: BackgroundTasks):
     job_id       = data.get("job_id")
     applicant_id = data.get("applicant_id")
-    label        = data.get("label", "automatic")
+
+    # ahora por defecto, si no envían label => 'pending'
+    label = data.get("label") or "pending"
 
     if not (job_id and applicant_id):
         raise HTTPException(400, "Faltan campos")
 
-    conn = None
-    cur  = None
+    conn = cur = None
     try:
         conn = db()
         cur  = conn.cursor()
+
         cur.execute("""
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
             SELECT %s, %s, %s, %s, NOW()
@@ -283,6 +283,7 @@ def create(data: dict, bg: BackgroundTasks):
         conn.commit()
         logger.info("🆕 propuesta %d creada (%s)", pid, label)
 
+        # sólo las 'automatic' disparan deliver
         if label == "automatic":
             bg.add_task(deliver, pid, True)
 
@@ -306,11 +307,11 @@ def cancel(data: dict):
     if not pid:
         raise HTTPException(400, "proposal_id requerido")
 
-    conn = None
-    cur  = None
+    conn = cur = None
     try:
         conn = db()
         cur  = conn.cursor()
+
         cur.execute("SELECT status FROM proposals WHERE id = %s", (pid,))
         row = cur.fetchone()
         if not row:
@@ -319,7 +320,7 @@ def cancel(data: dict):
             raise HTTPException(400, "Estado no cancelable")
 
         cur.execute(
-            "UPDATE proposals SET status='cancelled', cancelled_at=NOW() WHERE id = %s",
+            "UPDATE proposals SET status='cancelled', cancelled_at = NOW() WHERE id = %s",
             (pid,)
         )
         conn.commit()
@@ -348,8 +349,7 @@ def send_manual(pid: int):
 
 @router.delete("/{pid}", dependencies=[Depends(get_current_admin)])
 def delete_cancelled(pid: int):
-    conn = None
-    cur  = None
+    conn = cur = None
     try:
         conn = db()
         cur  = conn.cursor()
@@ -381,18 +381,16 @@ def delete_cancelled(pid: int):
 
 @router.get("/", dependencies=[Depends(get_current_admin)])
 def list_proposals():
-    conn = None
-    cur  = None
+    conn = cur = None
     try:
         conn = db()
         cur  = conn.cursor()
 
-        # Detectar dinámicamente columnas de e-mail / phone en Job
         cols      = job_columns(cur)
-        email_col = ("contact_email"   if "contact_email" in cols
+        email_col = ("contact_email"    if "contact_email"    in cols
                      else "\"contactEmail\"" if "contactEmail" in cols
                      else None)
-        phone_col = ("contact_phone"    if "contact_phone" in cols
+        phone_col = ("contact_phone"    if "contact_phone"    in cols
                      else "\"contactPhone\"" if "contactPhone" in cols
                      else None)
 
@@ -421,8 +419,8 @@ def list_proposals():
               u.name         AS applicant_name,
               u.email        AS applicant_email
             FROM proposals p
-            JOIN "Job"   j ON p.job_id      = j.id
-            JOIN "User"  u ON p.applicant_id = u.id
+            JOIN "Job"  j ON p.job_id      = j.id
+            JOIN "User" u ON p.applicant_id = u.id
             ORDER BY p.created_at DESC
         """
         logger.debug("list_proposals SQL → %s", sql)
