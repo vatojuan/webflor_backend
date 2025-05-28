@@ -1,5 +1,8 @@
 # app/routers/job.py
-import os, traceback, requests, psycopg2
+import os
+import traceback
+import requests
+import psycopg2
 from datetime import datetime
 from typing import Optional, List
 
@@ -22,6 +25,7 @@ def get_current_admin_sub(token: str = Depends(oauth2)) -> str:
     except (JWTError, KeyError):
         raise HTTPException(401, "Token inválido o expirado")
 
+
 # ────────────────────────── DB ────────────────────────────
 def get_db_connection():
     return psycopg2.connect(
@@ -40,6 +44,7 @@ def get_admin_id_by_email(email: str) -> Optional[int]:
     cur.close(); conn.close()
     return row[0] if row else None
 
+
 # ────────────────────── OpenAI Embedding ──────────────────
 def generate_embedding(text: str) -> Optional[List[float]]:
     try:
@@ -57,6 +62,7 @@ def generate_embedding(text: str) -> Optional[List[float]]:
         traceback.print_exc()
         return None
 
+
 # ──────────────────── helpers columna ────────────────────
 def job_has_column(cur, col: str) -> bool:
     cur.execute(
@@ -67,6 +73,7 @@ def job_has_column(cur, col: str) -> bool:
         """, (col,)
     )
     return bool(cur.fetchone())
+
 
 # ────────────────────  POST /create-admin  ───────────────
 @router.post("/create-admin", status_code=201, dependencies=[Depends(oauth2)])
@@ -112,36 +119,40 @@ async def create_admin_job(
 
     embedding = generate_embedding(f"{title}\n{description}\n{requirements}")
 
-    conn = get_db_connection(); cur = conn.cursor()
+    conn = get_db_connection()
+    cur = conn.cursor()
     try:
         # ── inspeccionamos columnas opcionales ──
-        has_is_paid      = job_has_column(cur, "is_paid")
-        has_snake_contact= job_has_column(cur, "contact_email")
-        has_camel_contact= job_has_column(cur, "contactEmail")
+        has_is_paid       = job_has_column(cur, "is_paid")
+        has_snake_contact = job_has_column(cur, "contact_email")
+        has_camel_contact = job_has_column(cur, "contactEmail")
 
-        email_col = None; phone_col = None
+        email_col = None
+        phone_col = None
         if has_snake_contact:
             email_col, phone_col = "contact_email", "contact_phone"
         elif has_camel_contact:
             email_col, phone_col = "contactEmail", "contactPhone"
 
         # ── construimos query dinámica ──
-        fields  = [
+        fields = [
             "title", "description", "requirements", '"expirationDate"',
             '"userId"', "embedding", "label", "source"
         ]
-        values  = [
+        values = [
             title, description, requirements, exp_date,
             user_id, embedding, label, source
         ]
 
         if has_is_paid:
-            fields.append("is_paid"); values.append(is_paid)
+            fields.append("is_paid")
+            values.append(is_paid)
         if email_col:
-            fields.append(email_col);  values.append(contact_email)
-            fields.append(phone_col);  values.append(contact_phone)
+            fields.extend([email_col, phone_col])
+            values.extend([contact_email, contact_phone])
 
-        sql = f'INSERT INTO "Job" ({", ".join(fields)}) VALUES ({", ".join(["%s"]*len(fields))}) RETURNING id;'
+        placeholders = ", ".join(["%s"] * len(fields))
+        sql = f'INSERT INTO "Job" ({", ".join(fields)}) VALUES ({placeholders}) RETURNING id;'
         cur.execute(sql, tuple(values))
         job_id = cur.fetchone()[0]
         conn.commit()
@@ -151,12 +162,15 @@ async def create_admin_job(
         traceback.print_exc()
         raise HTTPException(500, f"Error interno al crear oferta: {e}")
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
 
     # devolvemos lo grabado para que el front lo use al instante
     return {
         "message": "Oferta creada",
-        "jobId":   job_id,
+        "jobId":        job_id,
+        "label":        label,
+        "isPaid":       is_paid,
         "contactEmail": contact_email,
         "contactPhone": contact_phone
     }
