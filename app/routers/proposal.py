@@ -11,7 +11,7 @@ import os
 import time
 import logging
 import smtplib
-import dns.resolver            # ← requiere `python-dns`
+import dns.resolver
 from email.message import EmailMessage
 from datetime import timedelta
 from typing import Tuple, Optional, Set
@@ -29,8 +29,8 @@ load_dotenv()
 # ───────────────────────── Configuración ──────────────────────────
 SECRET_KEY   = os.getenv("SECRET_KEY", "")
 ALGORITHM    = os.getenv("ALGORITHM", "HS256")
-AUTO_DELAY   = int(os.getenv("AUTO_PROPOSAL_DELAY", "300"))  # segundos
-SMTP_TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "20"))          # segundos
+AUTO_DELAY   = int(os.getenv("AUTO_PROPOSAL_DELAY", "300"))
+SMTP_TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "20"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,9 +53,6 @@ def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
 
 
 def db() -> psycopg2.extensions.connection:
-    """
-    Conexión cruda (autocommit=False) usando el engine de SQLAlchemy.
-    """
     conn = engine.raw_connection()
     conn.autocommit = False
     return conn
@@ -72,9 +69,6 @@ def _smtp_cfg() -> Tuple[str, int, str, str]:
 
 
 def _check_mx(address: str) -> None:
-    """
-    Solo avisos en logs si no hay MX.
-    """
     domain = address.split("@")[-1]
     try:
         dns.resolver.resolve(domain, "MX")
@@ -246,8 +240,6 @@ def deliver(pid: int, sleep_first: bool) -> None:
 def create(data: dict, bg: BackgroundTasks):
     job_id       = data.get("job_id")
     applicant_id = data.get("applicant_id")
-    # Usamos label tal cual llega, y por defecto 'manual'
-    label        = data.get("label") or "manual"
 
     if not (job_id and applicant_id):
         raise HTTPException(400, "Faltan campos")
@@ -257,6 +249,14 @@ def create(data: dict, bg: BackgroundTasks):
         conn = db()
         cur  = conn.cursor()
 
+        # Leemos el label directamente de la oferta (Job)
+        cur.execute('SELECT label FROM "Job" WHERE id = %s', (job_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Oferta no existe")
+        label = row[0] or "manual"
+
+        # Insertamos usando ese label
         cur.execute("""
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
             SELECT %s, %s, %s, %s, NOW()
@@ -269,12 +269,12 @@ def create(data: dict, bg: BackgroundTasks):
             "waiting" if label == "automatic" else "pending",
             job_id, applicant_id
         ))
-        row = cur.fetchone()
-        if not row:
+        row2 = cur.fetchone()
+        if not row2:
             conn.commit()
             return {"message": "Ya existe una propuesta"}
 
-        pid = row[0]
+        pid = row2[0]
         conn.commit()
         logger.info("🆕 propuesta %d creada (%s)", pid, label)
 
@@ -384,7 +384,6 @@ def list_proposals():
         conn = db()
         cur  = conn.cursor()
 
-        # Detectar dinámicamente columnas de e-mail / phone en Job
         cols      = job_columns(cur)
         email_col = ("contact_email"    if "contact_email"    in cols
                      else "\"contactEmail\"" if "contactEmail" in cols
