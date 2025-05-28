@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 
-# Routers públicos
+# ──────────── Routers públicos ────────────
 from app.routers import (
     auth as public_auth,
     cv_confirm,
@@ -17,9 +17,11 @@ from app.routers import (
     users,
     webhooks,
 )
-# Auth Admin (login)
+
+# Login de administradores
 from backend.auth import router as admin_router
-# Routers de administración
+
+# ───── Routers de administración (protección con token) ─────
 from app.routers import (
     cv_admin_upload,
     job,
@@ -27,15 +29,12 @@ from app.routers import (
     admin_users,
     proposal,
 )
-# Router de matchings
-from app.routers.matchings_admin import router as matchings_admin_router
-# Router de configuración
-from app.routers.admin_config import router as admin_config_router
-# Router de plantillas de propuesta
-from app.routers.admin_templates import router as admin_templates_router
-# Router BD e-mails
-from app.routers.email_db_admin import router as email_db_admin_router
+from app.routers.matchings_admin    import router as matchings_admin_router
+from app.routers.admin_config       import router as admin_config_router
+from app.routers.admin_templates    import router as admin_templates_router
+from app.routers.email_db_admin     import router as email_db_admin_router   # <–– aquí está nuestro router
 
+# ───────────────────────────────────────────
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM  = os.getenv("ALGORITHM", "HS256")
@@ -48,31 +47,30 @@ app = FastAPI(
     root_path="/",
 )
 
-# CORS
-origins = os.getenv("FRONTEND_ORIGINS", "").split(",")
-if not origins or origins == [""]:
+# ──────────── CORS ────────────
+origins = os.getenv("FRONTEND_ORIGINS", "").split(",") or ["*"]
+if origins == [""]:  # cadena vacía → lista vacía
     origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins     = origins,
+    allow_credentials = True,
+    allow_methods     = ["*"],
+    allow_headers     = ["*"],
 )
 
-# Logging middleware
+# ──────────── Logging de peticiones ────────────
 @app.middleware("http")
 async def log_request(request: Request, call_next):
-    print(
-        "📥", request.method, request.url.path,
-        "proto=", request.headers.get("x-forwarded-proto"),
-        "host=", request.headers.get("host")
-    )
+    print("📥", request.method, request.url.path,
+          "proto=", request.headers.get("x-forwarded-proto"),
+          "host=",  request.headers.get("host"))
     resp = await call_next(request)
     print("📤", resp.status_code)
     return resp
 
-# Routers públicos
+# ──────────── Inclusión de routers públicos ────────────
 for r in (
     public_auth.router,
     cv_confirm.router,
@@ -86,7 +84,7 @@ for r in (
 ):
     app.include_router(r)
 
-# Auth admin-login
+# ──────────── Autenticación admin ────────────
 app.include_router(admin_router, prefix="/auth", tags=["admin"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
@@ -95,38 +93,29 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
         raise HTTPException(401, "Token no proporcionado")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        sub = payload.get("sub")
+        sub     = payload.get("sub")
         if not sub:
             raise HTTPException(401, "Token inválido o expirado")
     except JWTError:
         raise HTTPException(401, "Token inválido o expirado")
     return sub
 
-# Routers protegidos
-
-# CV admin upload
+# ──────────── Routers protegidos ────────────
 app.include_router(
     cv_admin_upload.router,
     tags=["cv_admin"],
     dependencies=[Depends(get_current_admin)],
 )
 
-# Job public/admin
-app.include_router(
-    job.router,
-    prefix="/api/job",
-    tags=["job"],
-)
-app.include_router(
-    job_admin.router,
-    tags=["job_admin"],
-)
+# Job públicos y de admin
+app.include_router(job.router,       prefix="/api/job", tags=["job"])
+app.include_router(job_admin.router,                     tags=["job_admin"])
 
-# Admin users & proposals
+# Usuarios, propuestas
 app.include_router(admin_users.router, tags=["admin_users"])
-app.include_router(proposal.router, tags=["proposals"])
+app.include_router(proposal.router,    tags=["proposals"])
 
-# Plantillas de propuesta (CRUD + default)
+# Plantillas de propuesta
 app.include_router(
     admin_templates_router,
     prefix="/api/admin/templates",
@@ -146,17 +135,17 @@ app.include_router(
     dependencies=[Depends(get_current_admin)],
 )
 
-# BD e-mails: carga masiva, manual, CRUD y mailing
+# ──────────── BD de e-mails  (¡¡sin prefix duplicado!!) ────────────
+# El router YA trae prefix="/api/admin/emails"
 app.include_router(
     email_db_admin_router,
-    prefix="/api/admin/emails",
     tags=["email_db"],
     dependencies=[Depends(get_current_admin)],
 )
 
-# Endpoints adicionales
+# ──────────── Endpoints extra ────────────
 @app.get("/admin/protected", tags=["admin"])
-def admin_protected(user=Depends(get_current_admin)):
+def admin_protected(user = Depends(get_current_admin)):
     return {"message": f"Bienvenido, {user}"}
 
 @app.get("/")
