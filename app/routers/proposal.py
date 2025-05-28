@@ -13,8 +13,8 @@ import logging
 import smtplib
 import dns.resolver
 from email.message import EmailMessage
-from datetime import timedelta
-from typing import Tuple, Optional, Set
+from datetime import datetime, timedelta
+from typing import Tuple, Optional, Set, Dict
 
 import psycopg2
 from dotenv import load_dotenv
@@ -126,6 +126,20 @@ def debug_dump_job(job_id: int, job: dict) -> None:
                  ", ".join(f"{k}={v!r}" for k, v in job.items()))
 
 
+# ─────────────────── Reemplazo de placeholders ───────────────────
+def apply_template(tpl: Dict[str, str], context: Dict[str, str]) -> Tuple[str, str]:
+    """
+    Dada una plantilla con 'subject' y 'body' y un contexto de claves->valores,
+    reemplaza {{key}} por su valor.
+    """
+    subj = tpl.get("subject", "")
+    body = tpl.get("body", "")
+    for key, val in context.items():
+        subj = subj.replace(f"{{{{{key}}}}}", val)
+        body = body.replace(f"{{{{{key}}}}}", val)
+    return subj, body
+
+
 # ─────────────────────────── Lógica de entrega ─────────────────────
 def deliver(pid: int, sleep_first: bool) -> None:
     if sleep_first:
@@ -138,22 +152,20 @@ def deliver(pid: int, sleep_first: bool) -> None:
         cur  = conn.cursor()
 
         # 1) Estado actual
-        cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id = %s", (pid,))
+        cur.execute("SELECT status, job_id, applicant_id, created_at FROM proposals WHERE id = %s", (pid,))
         row = cur.fetchone()
         if not row:
             logger.warning("Propuesta %d no existe", pid)
             return
-        status, job_id, applicant_id = row
+        status, job_id, applicant_id, created_at = row
 
-        # El sleep-first solo aplica si estaba en 'waiting'
         if sleep_first and status != "waiting":
-            logger.info("Propuesta %d dejó waiting (%s)", pid, status)
+            logger.info("Propuesta %d dejó 'waiting' (%s)", pid, status)
             return
-        # El manual send solo puede ejecutarse si sigue en 'pending'
         if not sleep_first and status != "pending":
             raise HTTPException(400, "Solo proposals en pending")
 
-        # 2) Job
+        # 2) Cargar Job
         cur.execute('SELECT * FROM "Job" WHERE id = %s', (job_id,))
         jrow = cur.fetchone()
         if not jrow:
@@ -168,21 +180,46 @@ def deliver(pid: int, sleep_first: bool) -> None:
         contact_email = job.get("contact_email") or job.get("contactEmail")
         contact_phone = job.get("contact_phone") or job.get("contactPhone")
 
-        # 3) Postulante
+        # 3) Cargar postulante
         cur.execute('SELECT name, email, "cvUrl" FROM "User" WHERE id = %s', (applicant_id,))
         a_name, a_mail, cv_url = cur.fetchone()
 
-        # 4) Destino final
-        if source == "admin":
-            dest_mail, dest_phone = contact_email, contact_phone
+        # 4) Cargar empleador
+        cur.execute('SELECT name FROM "User" WHERE id = %s', (owner_id,))
+        owner_row = cur.fetchone()
+        employer_name = owner_row[0] if owner_row else ""
+
+        # 5) Construir contexto de reemplazo
+        context = {
+            "applicant_name": a_name,
+            "job_title":      title,
+            "employer_name":  employer_name,
+            "cv_url":         cv_url or "",
+            "created_at":     created_at.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        # 6) Obtener plantilla predeterminada según label
+        cur.execute("""
+            SELECT subject, body
+              FROM templates
+             WHERE type = %s AND is_default = TRUE
+             LIMIT 1
+        """, (job.get("label") or "manual",))
+        tpl_row = cur.fetchone()
+        if tpl_row:
+            tpl = {"subject": tpl_row[0], "body": tpl_row[1]}
+            subj, body = apply_template(tpl, context)
         else:
-            cur.execute('SELECT email, phone FROM "User" WHERE id = %s', (owner_id,))
-            dest_mail, dest_phone = cur.fetchone()
+            # Fallback legacy
+            subj = f"Nueva propuesta – {title}"
+            body = (
+                f"Hola,\n\n"
+                f"{a_name} se postuló a «{title}».\n"
+                f"Mail candidato: {a_mail}\n"
+            )
 
-        logger.debug("Destino e-mail: %r  phone: %r", dest_mail, dest_phone)
-
-        # 5) Validar e-mail
-        if not dest_mail:
+        # 7) Validar e-mail
+        if not contact_email:
             cur.execute("""
                 UPDATE proposals
                    SET status='error_email',
@@ -194,15 +231,9 @@ def deliver(pid: int, sleep_first: bool) -> None:
             logger.warning("❗ propuesta sin e-mail, marcada error_email")
             return
 
-        # 6) Envío de correo
-        subj = f"Nueva propuesta – {title}"
-        body = (
-            f"Hola,\n\n"
-            f"{a_name} se postuló a «{title}».\n"
-            f"Mail candidato: {a_mail}\n"
-        )
+        # 8) Envío de correo
         try:
-            send_mail(dest_mail, subj, body, cv_url)
+            send_mail(contact_email, subj, body, cv_url)
         except Exception as exc:
             cur.execute("""
                 UPDATE proposals
@@ -214,8 +245,8 @@ def deliver(pid: int, sleep_first: bool) -> None:
             conn.commit()
             return
 
-        # 7) WhatsApp y marcar como enviada
-        send_whatsapp(dest_phone, f"Nueva propuesta para «{title}».")
+        # 9) WhatsApp y marcar como enviada
+        send_whatsapp(contact_phone, f"Nueva propuesta para «{title}».")
         cur.execute(
             "UPDATE proposals SET status='sent', sent_at = NOW() WHERE id = %s",
             (pid,)
@@ -249,14 +280,14 @@ def create(data: dict, bg: BackgroundTasks):
         conn = db()
         cur  = conn.cursor()
 
-        # Leemos el label directamente de la oferta (Job)
+        # Leer label de la oferta
         cur.execute('SELECT label FROM "Job" WHERE id = %s', (job_id,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "Oferta no existe")
         label = row[0] or "manual"
 
-        # Insertamos usando ese label
+        # Insertar propuesta con ese label
         cur.execute("""
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
             SELECT %s, %s, %s, %s, NOW()
@@ -278,7 +309,6 @@ def create(data: dict, bg: BackgroundTasks):
         conn.commit()
         logger.info("🆕 propuesta %d creada (%s)", pid, label)
 
-        # Si es automática, agendamos envío
         if label == "automatic":
             bg.add_task(deliver, pid, True)
 
