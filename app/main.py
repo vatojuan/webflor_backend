@@ -103,58 +103,50 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
     return sub
 
 # Routers protegidos
+
+# CV admin upload
 app.include_router(
     cv_admin_upload.router,
     tags=["cv_admin"],
     dependencies=[Depends(get_current_admin)],
 )
 
-# job.router NO tiene prefix → lo ponemos aquí
+# Job public/admin
 app.include_router(
     job.router,
     prefix="/api/job",
     tags=["job"],
 )
-
-# job_admin.router YA incluye prefix="/api/job"
 app.include_router(
     job_admin.router,
     tags=["job_admin"],
 )
 
-app.include_router(
-    admin_users.router,
-    tags=["admin_users"],
-)
+# Admin users & proposals
+app.include_router(admin_users.router, tags=["admin_users"])
+app.include_router(proposal.router, tags=["proposals"])
 
-app.include_router(
-    proposal.router,
-    tags=["proposals"],
-)
-
-# Plantillas de propuesta (CRUD + default) bajo /api/admin/templates
+# Plantillas de propuesta (CRUD + default)
 app.include_router(
     admin_templates_router,
     prefix="/api/admin/templates",
     tags=["admin_templates"],
-    dependencies=[Depends(get_current_admin)]
+    dependencies=[Depends(get_current_admin)],
 )
 
-# matchings_admin_router ya define prefix="/api/admin"
+# Matchings y configuración
 app.include_router(
     matchings_admin_router,
     tags=["matchings"],
     dependencies=[Depends(get_current_admin)],
 )
-
-# admin_config_router ya define prefix="/api/admin/config"
 app.include_router(
     admin_config_router,
     tags=["admin_config"],
     dependencies=[Depends(get_current_admin)],
 )
 
-# BD e-mails: carga masiva y manual
+# BD e-mails: carga masiva, manual, CRUD y mailing
 app.include_router(
     email_db_admin_router,
     prefix="/api/admin/emails",
@@ -162,7 +154,7 @@ app.include_router(
     dependencies=[Depends(get_current_admin)],
 )
 
-# endpoints adicionales
+# Endpoints adicionales
 @app.get("/admin/protected", tags=["admin"])
 def admin_protected(user=Depends(get_current_admin)):
     return {"message": f"Bienvenido, {user}"}
