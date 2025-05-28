@@ -246,8 +246,8 @@ def deliver(pid: int, sleep_first: bool) -> None:
 def create(data: dict, bg: BackgroundTasks):
     job_id       = data.get("job_id")
     applicant_id = data.get("applicant_id")
-    # Por defecto, si no envían label, lo consideramos 'pending'
-    label        = data.get("label") or "pending"
+    # Usamos label tal cual llega, y por defecto 'manual'
+    label        = data.get("label") or "manual"
 
     if not (job_id and applicant_id):
         raise HTTPException(400, "Faltan campos")
@@ -278,7 +278,7 @@ def create(data: dict, bg: BackgroundTasks):
         conn.commit()
         logger.info("🆕 propuesta %d creada (%s)", pid, label)
 
-        # Solo las 'automatic' disparan deliver
+        # Si es automática, agendamos envío
         if label == "automatic":
             bg.add_task(deliver, pid, True)
 
