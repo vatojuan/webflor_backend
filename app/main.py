@@ -33,6 +33,8 @@ from app.routers.matchings_admin import router as matchings_admin_router
 from app.routers.admin_config import router as admin_config_router
 # Router de plantillas de propuesta
 from app.routers.admin_templates import router as admin_templates_router
+# Router BD e-mails
+from app.routers.email_db_admin import router as email_db_admin_router
 
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -149,6 +151,14 @@ app.include_router(
 app.include_router(
     admin_config_router,
     tags=["admin_config"],
+    dependencies=[Depends(get_current_admin)],
+)
+
+# BD e-mails: carga masiva y manual
+app.include_router(
+    email_db_admin_router,
+    prefix="/api/admin/emails",
+    tags=["email_db"],
     dependencies=[Depends(get_current_admin)],
 )
 
