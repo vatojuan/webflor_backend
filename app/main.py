@@ -29,10 +29,11 @@ from app.routers import (
     admin_users,
     proposal,
 )
-from app.routers.matchings_admin    import router as matchings_admin_router
-from app.routers.admin_config       import router as admin_config_router
-from app.routers.admin_templates    import router as admin_templates_router
-from app.routers.email_db_admin     import router as email_db_admin_router   # <–– aquí está nuestro router
+# Corrección de import: el archivo se llama match.py, no matchings_admin.py
+from app.routers.match import router as matchings_admin_router
+from app.routers.admin_config    import router as admin_config_router
+from app.routers.admin_templates import router as admin_templates_router
+from app.routers.email_db_admin  import router as email_db_admin_router
 
 # ───────────────────────────────────────────
 load_dotenv()
@@ -49,7 +50,7 @@ app = FastAPI(
 
 # ──────────── CORS ────────────
 origins = os.getenv("FRONTEND_ORIGINS", "").split(",") or ["*"]
-if origins == [""]:  # cadena vacía → lista vacía
+if origins == [""]:
     origins = ["*"]
 
 app.add_middleware(
@@ -71,7 +72,7 @@ async def log_request(request: Request, call_next):
     return resp
 
 # ──────────── Inclusión de routers públicos ────────────
-for r in (
+for router in (
     public_auth.router,
     cv_confirm.router,
     cv_upload.router,
@@ -82,7 +83,7 @@ for r in (
     users.router,
     webhooks.router,
 ):
-    app.include_router(r)
+    app.include_router(router)
 
 # ──────────── Autenticación admin ────────────
 app.include_router(admin_router, prefix="/auth", tags=["admin"])
@@ -107,13 +108,13 @@ app.include_router(
     dependencies=[Depends(get_current_admin)],
 )
 
-# Job públicos y de admin
+# Job públicos y admin
 app.include_router(job.router,       prefix="/api/job", tags=["job"])
-app.include_router(job_admin.router,                     tags=["job_admin"])
+app.include_router(job_admin.router,                   tags=["job_admin"])
 
-# Usuarios, propuestas
-app.include_router(admin_users.router, tags=["admin_users"])
-app.include_router(proposal.router,    tags=["proposals"])
+# Usuarios y propuestas
+app.include_router(admin_users.router,  tags=["admin_users"])
+app.include_router(proposal.router,     tags=["proposals"])
 
 # Plantillas de propuesta
 app.include_router(
@@ -126,6 +127,7 @@ app.include_router(
 # Matchings y configuración
 app.include_router(
     matchings_admin_router,
+    prefix="/api/match",                   # coincide con el prefix de match.py
     tags=["matchings"],
     dependencies=[Depends(get_current_admin)],
 )
@@ -135,8 +137,7 @@ app.include_router(
     dependencies=[Depends(get_current_admin)],
 )
 
-# ──────────── BD de e-mails  (¡¡sin prefix duplicado!!) ────────────
-# El router YA trae prefix="/api/admin/emails"
+# BD de e-mails (router ya trae su propio prefix)
 app.include_router(
     email_db_admin_router,
     tags=["email_db"],
@@ -154,5 +155,5 @@ def home():
 
 @app.on_event("startup")
 def list_routes():
-    for route in app.routes:
-        print("✅ Ruta cargada:", route.path)
+    for r in app.routes:
+        print("✅ Ruta cargada:", r.path)
