@@ -1,28 +1,38 @@
 # app/routers/job.py
+"""Endpoints públicos y de administración para ofertas (Job).
+Incluye:
+  • GET /api/job/                  → listado de ofertas vigentes
+  • GET /api/job/my-applications   → postulaciones del usuario logueado
+  • POST /api/job/create-admin     → crear oferta como administrador + matching
+No depende de módulos ausentes: define su propio helper `get_current_user` para JWT
+público.  Mantiene intacta la lógica existente de embeddings y matching.
+"""
+from __future__ import annotations
+
 import os
-import traceback
 import threading
+import traceback
 from datetime import datetime
-from typing import Optional, List
+from types import SimpleNamespace
+from typing import List, Optional
 
 import psycopg2
 import requests
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
-from jose import jwt, JWTError
+from jose import JWTError, jwt
 
 from app.routers.match import run_matching_for_job
-from app.routers.token_utils import get_current_user  # Ajustar al nombre real de tu dependencia
 
 load_dotenv()
 
 router = APIRouter(prefix="/api/job", tags=["job"])
 
-# ─────────────────── Auth & DB ───────────────────
-SECRET_KEY     = os.getenv("SECRET_KEY")
-ALGORITHM      = os.getenv("ALGORITHM", "HS256")
-DB_PARAMS      = {
+# ─────────────────── Configuración ───────────────────
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM  = os.getenv("ALGORITHM", "HS256")
+DB_PARAMS  = {
     "dbname":   os.getenv("DBNAME"),
     "user":     os.getenv("USER"),
     "password": os.getenv("PASSWORD"),
@@ -30,27 +40,47 @@ DB_PARAMS      = {
     "port":     int(os.getenv("DB_PORT", 5432)),
     "sslmode":  "require",
 }
-oauth2_admin   = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
+
+# Schemes separados para admin y usuarios finales
+oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
+oauth2_user  = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+# ─────────────────── Helpers de autenticación ───────────────────
 
 def get_current_admin_sub(token: str = Depends(oauth2_admin)) -> str:
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
     except (JWTError, KeyError):
-        raise HTTPException(401, "Token inválido o expirado")
+        raise HTTPException(401, "Token inválido o expirado (admin)")
+
+
+def get_current_user(token: str = Depends(oauth2_user)):
+    """Devuelve un objeto con atributo `id` (user.id) a partir del JWT público."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        uid = payload.get("sub")
+        if not uid:
+            raise ValueError
+        return SimpleNamespace(id=int(uid))
+    except (JWTError, ValueError):
+        raise HTTPException(401, "Token de usuario inválido o expirado")
+
+
+# ─────────────────── DB ───────────────────
 
 def get_db_connection():
     return psycopg2.connect(**DB_PARAMS)
 
+
 def get_admin_id_by_email(email: str) -> Optional[int]:
-    conn = get_db_connection()
-    cur  = conn.cursor()
+    conn = get_db_connection(); cur = conn.cursor()
     cur.execute('SELECT id FROM "User" WHERE email=%s LIMIT 1;', (email,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
+    row = cur.fetchone(); cur.close(); conn.close()
     return row[0] if row else None
 
-# ────────────────── OpenAI Embedding ──────────────────
+
+# ─────────────────── Embeddings (OpenAI) ───────────────────
+
 def generate_embedding(text: str) -> Optional[List[float]]:
     try:
         resp = requests.post(
@@ -64,92 +94,82 @@ def generate_embedding(text: str) -> Optional[List[float]]:
         ).json()
         return resp["data"][0]["embedding"]
     except Exception:
-        traceback.print_exc()
-        return None
+        traceback.print_exc(); return None
 
-# ────────────────── Column Helper ──────────────────
+
+# ─────────────────── Utilidad columnas opcionales ───────────────────
+
 def job_has_column(cur, col: str) -> bool:
     cur.execute(
         """
-        SELECT 1
-          FROM information_schema.columns
-         WHERE table_name = 'Job'
-           AND column_name = %s
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name='Job' AND column_name=%s
          LIMIT 1
         """, (col,)
     )
     return bool(cur.fetchone())
 
-# ───────────────── GET / ─────────────────
-@router.get("/", summary="Listar todas las ofertas activas")
+
+# ══════════════════ Endpoints públicos ══════════════════
+
+@router.get("/", summary="Listar ofertas activas")
 async def list_jobs():
-    conn = get_db_connection()
-    cur  = conn.cursor()
-    cur.execute("""
+    conn = get_db_connection(); cur = conn.cursor()
+    cur.execute(
+        """
         SELECT id, title, description, requirements,
                "expirationDate", "userId", source, label
           FROM public."Job"
          WHERE "expirationDate" IS NULL OR "expirationDate" > NOW()
          ORDER BY id DESC
-    """)
-    cols = [desc[0] for desc in cur.description]
+        """
+    )
+    cols   = [c[0] for c in cur.description]
     offers = [dict(zip(cols, row)) for row in cur.fetchall()]
-    cur.close()
-    conn.close()
+    cur.close(); conn.close()
     return {"offers": offers}
 
-# ──────────── GET /my-applications ────────────
-@router.get("/my-applications", summary="Obtener mis postulaciones")
-async def my_applications(current_user=Depends(get_current_user)):
-    """
-    Devuelve las propuestas que el usuario autenticado ha realizado.
-    """
-    user_id = current_user.id  # Ajustar según atributo real
-    conn    = get_db_connection()
-    cur     = conn.cursor()
-    cur.execute("""
-        SELECT p.id,
-               p.job_id   AS "jobId",
-               p.status,
-               p.created_at AS "createdAt"
-          FROM proposals p
-         WHERE p.user_id = %s
-         ORDER BY p.created_at DESC
-    """, (user_id,))
-    cols = [desc[0] for desc in cur.description]
-    applications = [dict(zip(cols, row)) for row in cur.fetchall()]
-    cur.close()
-    conn.close()
-    return {"applications": applications}
 
-# ─────────── POST /create-admin ───────────
+@router.get("/my-applications", summary="Postulaciones del usuario")
+async def my_applications(current_user = Depends(get_current_user)):
+    user_id = current_user.id
+    conn = get_db_connection(); cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, job_id AS "jobId", status, created_at AS "createdAt"
+          FROM proposals
+         WHERE user_id = %s
+         ORDER BY created_at DESC
+        """, (user_id,)
+    )
+    cols = [c[0] for c in cur.description]
+    apps = [dict(zip(cols, row)) for row in cur.fetchall()]
+    cur.close(); conn.close()
+    return {"applications": apps}
+
+
+# ══════════════════ Endpoint admin: crear oferta ══════════════════
+
 @router.post("/create-admin", status_code=201, dependencies=[Depends(oauth2_admin)])
-async def create_admin_job(
-    request: Request,
-    admin_sub: str = Depends(get_current_admin_sub)
-):
-    """
-    Crea una oferta nueva, genera su embedding y dispara matching asíncrono.
-    """
+async def create_admin_job(request: Request, admin_sub: str = Depends(get_current_admin_sub)):
     data          = await request.json()
     title         = (data.get("title") or "").strip()
     description   = (data.get("description") or "").strip()
     requirements  = (data.get("requirements") or "").strip()
     expiration    =  data.get("expirationDate")
     raw_user_id   =  data.get("userId")
-    label         =  data.get("label", "manual")
+
+    label         =  data.get("label",  "manual")
     source        =  data.get("source", "admin")
     is_paid       =  bool(data.get("isPaid", False))
     contact_email =  data.get("contactEmail") or data.get("contact_email")
     contact_phone =  data.get("contactPhone") or data.get("contact_phone")
 
-    # Validaciones
     if not title or not description:
         raise HTTPException(400, "title y description son obligatorios")
     if source == "admin" and not contact_email:
         raise HTTPException(400, "Las ofertas del administrador requieren contactEmail")
 
-    # Parseo de fecha
     exp_date = None
     if expiration:
         try:
@@ -157,7 +177,7 @@ async def create_admin_job(
         except ValueError:
             raise HTTPException(400, "expirationDate inválida (ISO-8601)")
 
-    # Determinar user_id
+    # User asociado a la oferta
     try:
         user_id = int(raw_user_id)
     except (TypeError, ValueError):
@@ -165,14 +185,11 @@ async def create_admin_job(
         if not user_id:
             raise HTTPException(400, "No se encontró admin en User")
 
-    # Generar embedding
     embedding = generate_embedding(f"{title}\n{description}\n{requirements}")
 
-    # Insertar en BD
-    conn = get_db_connection()
-    cur  = conn.cursor()
+    conn = get_db_connection(); cur = conn.cursor()
     try:
-        # Detectar columnas adicionales
+        # columnas opcionales existentes
         has_is_paid       = job_has_column(cur, "is_paid")
         has_snake_contact = job_has_column(cur, "contact_email")
         has_camel_contact = job_has_column(cur, "contactEmail")
@@ -192,30 +209,29 @@ async def create_admin_job(
             user_id, embedding, label, source,
         ]
         if has_is_paid:
-            fields.append("is_paid")
-            values.append(is_paid)
+            fields.append("is_paid"); values.append(is_paid)
         if email_col:
             fields.extend([email_col, phone_col])
             values.extend([contact_email, contact_phone])
 
-        placeholders = ", ".join(["%s"] * len(fields))
-        sql = f'INSERT INTO "Job" ({", ".join(fields)}) VALUES ({placeholders}) RETURNING id;'
-        cur.execute(sql, tuple(values))
+        ph = ", ".join(["%s"] * len(fields))
+        cur.execute(
+            f'INSERT INTO "Job" ({", ".join(fields)}) VALUES ({ph}) RETURNING id;',
+            tuple(values),
+        )
         job_id = cur.fetchone()[0]
         conn.commit()
-    except Exception as e:
-        conn.rollback()
-        traceback.print_exc()
-        raise HTTPException(500, f"Error interno al crear oferta: {e}")
+    except Exception as exc:
+        conn.rollback(); traceback.print_exc();
+        raise HTTPException(500, f"Error interno al crear oferta: {exc}")
     finally:
-        cur.close()
-        conn.close()
+        cur.close(); conn.close()
 
-    # Disparar matching en segundo plano
+    # Matching en background (no bloquea respuesta)
     threading.Thread(target=run_matching_for_job, args=(job_id,), daemon=True).start()
 
     return {
-        "message":      "Oferta creada",
+        "message": "Oferta creada",
         "jobId":        job_id,
         "label":        label,
         "isPaid":       is_paid,
