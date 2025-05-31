@@ -23,20 +23,19 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from psycopg2.extensions import connection  # solo tipado
 
-from app.database import get_db_connection  # conexión única
+from app.database import get_db_connection            # conexión única
 from app.routers.match import run_matching_for_job
 
 load_dotenv()
 
 # ─────────────── JWT ───────────────
 SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = os.getenv("ALGORITHM", "HS256")
+ALGORITHM  = os.getenv("ALGORITHM", "HS256")
 
 oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
-oauth2_user = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2_user  = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 router = APIRouter(prefix="/api/job", tags=["job"])
-
 
 # ─────────────── Auth helpers ───────────────
 def get_current_admin_sub(token: str = Depends(oauth2_admin)) -> str:
@@ -44,7 +43,6 @@ def get_current_admin_sub(token: str = Depends(oauth2_admin)) -> str:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
     except (JWTError, KeyError):
         raise HTTPException(401, "Token inválido o expirado (admin)")
-
 
 def get_current_user(token: str = Depends(oauth2_user)):
     try:
@@ -56,7 +54,6 @@ def get_current_user(token: str = Depends(oauth2_user)):
     except (JWTError, ValueError):
         raise HTTPException(401, "Token de usuario inválido o expirado")
 
-
 # ─────────────── DB helpers ───────────────
 def get_admin_id_by_email(email: str) -> Optional[int]:
     conn: connection = get_db_connection()
@@ -66,23 +63,15 @@ def get_admin_id_by_email(email: str) -> Optional[int]:
         row = cur.fetchone()
         return row[0] if row else None
     finally:
-        cur.close()
-        conn.close()
-
+        cur.close(); conn.close()
 
 def job_has_column(cur, col: str) -> bool:
-    cur.execute(
-        """
-        SELECT 1
-          FROM information_schema.columns
-         WHERE table_name = 'Job'
-           AND column_name = %s
+    cur.execute("""
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'Job' AND column_name = %s
          LIMIT 1
-        """,
-        (col,),
-    )
+    """, (col,))
     return bool(cur.fetchone())
-
 
 # ─────────────── OpenAI embedding ───────────────
 def generate_embedding(text: str) -> Optional[List[float]]:
@@ -101,68 +90,57 @@ def generate_embedding(text: str) -> Optional[List[float]]:
         traceback.print_exc()
         return None
 
-
 # ══════════ Endpoints públicos ══════════
-
 @router.get("/", summary="Listar ofertas activas")
-@router.get("/list", include_in_schema=False)  # alias legacy
+@router.get("/list", include_in_schema=False)                     # alias legacy
 async def list_jobs(userId: Optional[int] = None):
     """
     Devuelve todas las ofertas no expiradas, ordenadas por id DESC.
     Si se pasa userId, filtra solo las ofertas de ese empleador.
+    Maneja la ausencia de columnas opcionales (source, label) sin lanzar error.
     """
-    conn = None
-    cur = None
+    conn = cur = None
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+        conn = get_db_connection(); cur = conn.cursor()
+
+        # --- columnas opcionales ---
+        has_source = job_has_column(cur, "source")
+        has_label  = job_has_column(cur, "label")
+
+        base_cols = [
+            'id', 'title', 'description', 'requirements',
+            '"expirationDate"', '"userId"'
+        ]
+        select_parts = base_cols[:]
+        select_parts.append('source' if has_source else 'NULL AS source')
+        select_parts.append('label'  if has_label  else 'NULL AS label')
+        select_sql = ", ".join(select_parts)
+
+        sql  = f"""
+            SELECT {select_sql}
+              FROM public."Job"
+             WHERE ("expirationDate" IS NULL OR "expirationDate" > NOW())
+        """
+        params = ()
         if userId is not None:
-            cur.execute(
-                """
-                SELECT
-                  id,
-                  title,
-                  description,
-                  requirements,
-                  "expirationDate",
-                  "userId",
-                  source,
-                  label
-                FROM public."Job"
-                WHERE ("expirationDate" IS NULL OR "expirationDate" > NOW())
-                  AND "userId" = %s
-                ORDER BY id DESC
-                """,
-                (userId,),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT
-                  id,
-                  title,
-                  description,
-                  requirements,
-                  "expirationDate",
-                  "userId",
-                  source,
-                  label
-                FROM public."Job"
-                WHERE "expirationDate" IS NULL OR "expirationDate" > NOW()
-                ORDER BY id DESC
-                """
-            )
-        cols = [d[0] for d in cur.description]
+            sql += ' AND "userId" = %s'
+            params = (userId,)
+
+        sql += " ORDER BY id DESC"
+        cur.execute(sql, params)
+
+        cols   = [d[0] for d in cur.description]
         offers = [dict(zip(cols, row)) for row in cur.fetchall()]
         return {"offers": offers}
-    except Exception:
+
+    except Exception as e:
+        print("❌ list_jobs error:", e)
         traceback.print_exc()
-        raise HTTPException(500, "Error interno al obtener las ofertas")
+        raise HTTPException(500, f"Error interno al obtener las ofertas: {e}")
+
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur:  cur.close()
+        if conn: conn.close()
 
 
 @router.get("/my-applications", summary="Postulaciones del usuario")
