@@ -1,3 +1,5 @@
+# main.py
+
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Request
@@ -5,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 
-# ─────────────────── Routers públicos ───────────────────
+# ──────────── Routers públicos ────────────
 from app.routers import (
     auth as public_auth,
     cv_confirm,
@@ -24,15 +26,15 @@ from backend.auth import router as admin_router
 # ───── Routers de administración (con token) ─────
 from app.routers import (
     cv_admin_upload,
-    job,            # YA trae prefix="/api/job"
-    job_admin,      # YA trae prefix="/api/job"
+    job,            # Contiene prefix="/api/job"
+    job_admin,      # Contiene prefix="/api/job"
     admin_users,
     proposal,
 )
-from app.routers.match             import router as matchings_admin_router   # prefix="/api/match"
-from app.routers.admin_config      import router as admin_config_router
-from app.routers.admin_templates   import router as admin_templates_router
-from app.routers.email_db_admin    import router as email_db_admin_router    # prefix="/api/admin/emails"
+from app.routers.match           import router as matchings_admin_router   # Contiene prefix="/api/match"
+from app.routers.admin_config    import router as admin_config_router
+from app.routers.admin_templates import router as admin_templates_router
+from app.routers.email_db_admin  import router as email_db_admin_router      # Contiene prefix="/api/admin/emails"
 
 # ─────────────────── Config global ───────────────────
 load_dotenv()
@@ -73,7 +75,10 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 def get_current_admin(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload.get("sub") or ""
+        sub     = payload.get("sub")
+        if not sub:
+            raise JWTError()
+        return sub
     except JWTError:
         raise HTTPException(401, "Token inválido o expirado")
 
@@ -102,12 +107,15 @@ app.include_router(
 )
 
 # ────── Job (público) y job-admin (protegido) ──────
-app.include_router(job.router,        tags=["job"])         # sin prefix extra
-app.include_router(job_admin.router,  tags=["job_admin"])   # sin prefix extra
+# job.router ya define prefix="/api/job"
+app.include_router(job.router)
+
+# job_admin.router también define prefix="/api/job", sus endpoints p. ej. "/api/job/admin_offers"
+app.include_router(job_admin.router, dependencies=[Depends(get_current_admin)])
 
 # ────── Otros protegidos ──────
-app.include_router(admin_users.router,  tags=["admin_users"])
-app.include_router(proposal.router,     tags=["proposals"])
+app.include_router(admin_users.router, tags=["admin_users"])
+app.include_router(proposal.router, tags=["proposals"])
 
 app.include_router(
     admin_templates_router,
@@ -117,7 +125,7 @@ app.include_router(
 )
 
 app.include_router(
-    matchings_admin_router,                     # YA tiene /api/match
+    matchings_admin_router,  # ya define prefix="/api/match"
     tags=["matchings"],
     dependencies=[Depends(get_current_admin)],
 )
@@ -129,7 +137,7 @@ app.include_router(
 )
 
 app.include_router(
-    email_db_admin_router,                      # YA tiene /api/admin/emails
+    email_db_admin_router,  # ya define prefix="/api/admin/emails"
     tags=["email_db"],
     dependencies=[Depends(get_current_admin)],
 )
