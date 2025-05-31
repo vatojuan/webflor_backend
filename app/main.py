@@ -108,7 +108,7 @@ app.include_router(
     dependencies=[Depends(get_current_admin)],
 )
 
-# Job públicos y admin
+# Job públicos y de admin
 app.include_router(job.router,       prefix="/api/job", tags=["job"])
 app.include_router(job_admin.router,                   tags=["job_admin"])
 
@@ -127,7 +127,7 @@ app.include_router(
 # Matchings y configuración
 app.include_router(
     matchings_admin_router,
-    prefix="/api/match",                   # coincide con el prefix de match.py
+    prefix="/api/match",
     tags=["matchings"],
     dependencies=[Depends(get_current_admin)],
 )

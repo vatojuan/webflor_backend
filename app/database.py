@@ -1,37 +1,68 @@
 # app/database.py
+"""
+Centraliza la configuración de BD para:
+  • psycopg2 (raw_connection)
+  • SQLAlchemy (ORM y engine)
 
+Todas las variables se leen de .env:
+  DBNAME, POSTGRES_DB
+  USER, POSTGRES_USER
+  PASSWORD, POSTGRES_PASSWORD
+  HOST
+  DB_PORT
+  DB_SSLMODE
+  SQLALCHEMY_DATABASE_URL (opcional)
+"""
 import os
-import psycopg2
 from dotenv import load_dotenv
+import psycopg2
 from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, declarative_base
 
 load_dotenv()
 
-# ───────────── SQLAlchemy ORM setup ─────────────
-# URL de conexión para SQLAlchemy (puedes ajustarla en .env o usar este valor por defecto)
+# ─────────────────── Parámetros de conexión ───────────────────
+DB_NAME     = os.getenv("DBNAME",        os.getenv("POSTGRES_DB", "postgres"))
+DB_USER     = os.getenv("USER",          os.getenv("POSTGRES_USER", "postgres"))
+DB_PASS     = os.getenv("PASSWORD",      os.getenv("POSTGRES_PASSWORD", ""))
+DB_HOST     = os.getenv("HOST",          "localhost")
+DB_PORT     = os.getenv("DB_PORT",       "5432")
+DB_SSLMODE  = os.getenv("DB_SSLMODE",    "require")
+
+# ─────────────────── SQLAlchemy ORM setup ───────────────────
+# Puede sobreescribirse completamente con SQLALCHEMY_DATABASE_URL en .env
 SQLALCHEMY_DATABASE_URL = os.getenv(
     "SQLALCHEMY_DATABASE_URL",
-    "postgresql://postgres:Juanchi190@localhost/webflor_db"
+    f"postgresql+psycopg2://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
+)
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+)
 Base = declarative_base()
 
-# ──────────── Conexión cruda con psycopg2 ────────────
-# Para los routers que usan SQL crudo (job.py, match.py, etc.)
+# ─────────────────── Conexión cruda con psycopg2 ───────────────────
 def get_db_connection():
+    """
+    Retorna una conexión psycopg2 usando las mismas variables de entorno.
+    Util para queries crudos (pgvector, embebidos, etc.).
+    """
     try:
-        conn = psycopg2.connect(
-            dbname   = os.getenv("DBNAME",   os.getenv("POSTGRES_DB")),
-            user     = os.getenv("USER",     os.getenv("POSTGRES_USER")),
-            password = os.getenv("PASSWORD", os.getenv("POSTGRES_PASSWORD")),
-            host     = os.getenv("HOST",     "localhost"),
-            port     = int(os.getenv("DB_PORT", 5432)),
-            sslmode  = os.getenv("DB_SSLMODE", "require"),
+        return psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASS,
+            host=DB_HOST,
+            port=int(DB_PORT),
+            sslmode=DB_SSLMODE,
         )
-        return conn
     except Exception as e:
-        # Si algo falla aquí, todos los routers que dependan de psycopg2 lanzarán excepción
-        raise Exception(f"Error en la conexión a la base de datos: {e}")
+        raise Exception(f"Error conectando a la base de datos: {e}")
