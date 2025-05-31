@@ -167,7 +167,7 @@ def deliver(pid: int, sleep_first: bool) -> None:
 
         # ── Plantilla predeterminada
         cur.execute("""SELECT subject, body
-                         FROM templates
+                         FROM proposal_templates
                         WHERE type = %s AND is_default = TRUE
                         LIMIT 1""", (label,))
         tpl = cur.fetchone()
