@@ -1,12 +1,10 @@
 # app/routers/job.py
 """
-Endpoints públicos y de administración para ofertas (Job).
-
-Incluye
-• GET  /api/job/                → listado de ofertas vigentes
-• GET  /api/job/list            → alias para listado de ofertas vigentes
-• GET  /api/job/my-applications → postulaciones del usuario logueado
-• POST /api/job/create-admin    → crear oferta como administrador + matching
+Endpoints Job
+• GET  /api/job/                – ofertas vigentes
+• GET  /api/job/list            – alias legacy
+• GET  /api/job/my-applications – postulaciones del usuario
+• POST /api/job/create-admin    – alta admin + matching
 """
 
 from __future__ import annotations
@@ -21,25 +19,23 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from psycopg2.extensions import connection  # solo tipado
+from psycopg2.extensions import connection           # solo tipado
 
-from app.database       import get_db_connection          # ← conexión centralizada
-from app.routers.match  import run_matching_for_job
+from app.database      import get_db_connection      # conexión única
+from app.routers.match import run_matching_for_job
 
 load_dotenv()
 
-# -------------------------------------------------------------------
-# Configuración JWT
-# -------------------------------------------------------------------
+# ─────────────── JWT ───────────────
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM  = os.getenv("ALGORITHM", "HS256")
 
 oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 oauth2_user  = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-router = APIRouter(tags=["job"])          # el prefijo /api/job lo añade main.py
+router = APIRouter(tags=["job"])        # ⚠️  **SIN** prefix – lo añade main.py
 
-# ─────────────────── Autenticación ───────────────────
+# ─────────────── Auth helpers ───────────────
 def get_current_admin_sub(token: str = Depends(oauth2_admin)) -> str:
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
@@ -53,10 +49,9 @@ def get_current_user(token: str = Depends(oauth2_user)):
     except Exception:
         raise HTTPException(401, "Token de usuario inválido o expirado")
 
-# ─────────────────── Helpers DB ───────────────────
+# ─────────────── DB helpers ───────────────
 def get_admin_id_by_email(email: str) -> Optional[int]:
-    conn: connection = get_db_connection()
-    cur  = conn.cursor()
+    conn: connection = get_db_connection(); cur = conn.cursor()
     cur.execute('SELECT id FROM "User" WHERE email=%s LIMIT 1;', (email,))
     row = cur.fetchone()
     cur.close(); conn.close()
@@ -69,10 +64,10 @@ def job_has_column(cur, col: str) -> bool:
     """, (col,))
     return bool(cur.fetchone())
 
-# ─────────────────── Embeddings (OpenAI) ───────────────────
+# ─────────────── OpenAI embedding ───────────────
 def generate_embedding(text: str) -> Optional[List[float]]:
     try:
-        resp = requests.post(
+        r = requests.post(
             "https://api.openai.com/v1/embeddings",
             headers={
                 "Content-Type": "application/json",
@@ -81,23 +76,23 @@ def generate_embedding(text: str) -> Optional[List[float]]:
             json={"model": "text-embedding-ada-002", "input": text},
             timeout=20,
         ).json()
-        return resp["data"][0]["embedding"]
+        return r["data"][0]["embedding"]
     except Exception:
         traceback.print_exc(); return None
 
-# ══════════════════ Endpoints públicos ══════════════════
+# ══════════ Endpoints públicos ══════════
 @router.get("/", summary="Listar ofertas activas")
-@router.get("/list", include_in_schema=False)          # alias legacy
+@router.get("/list", include_in_schema=False)              # alias legacy
 async def list_jobs():
     conn = get_db_connection(); cur = conn.cursor()
     cur.execute("""
-        SELECT id, title, description, requirements,
-               "expirationDate", "userId", source, label
+        SELECT id,title,description,requirements,
+               "expirationDate","userId",source,label
           FROM public."Job"
          WHERE "expirationDate" IS NULL OR "expirationDate" > NOW()
          ORDER BY id DESC
     """)
-    cols   = [c[0] for c in cur.description]
+    cols   = [d[0] for d in cur.description]
     offers = [dict(zip(cols, r)) for r in cur.fetchall()]
     cur.close(); conn.close()
     return {"offers": offers}
@@ -112,22 +107,23 @@ async def my_applications(current_user = Depends(get_current_user)):
          WHERE user_id = %s
          ORDER BY created_at DESC
     """, (current_user.id,))
-    cols = [c[0] for c in cur.description]
+    cols = [d[0] for d in cur.description]
     apps = [dict(zip(cols, r)) for r in cur.fetchall()]
     cur.close(); conn.close()
     return {"applications": apps}
 
-# ══════════ Endpoint admin: crear oferta + matching ══════════
+# ══════════ Alta admin + matching ══════════
 @router.post("/create-admin", status_code=201,
              dependencies=[Depends(oauth2_admin)])
 async def create_admin_job(request: Request,
                            admin_sub: str = Depends(get_current_admin_sub)):
-    data = await request.json()
-    title, description = (data.get("title") or "").strip(), (data.get("description") or "").strip()
-    if not title or not description:
+    data  = await request.json()
+    title = (data.get("title") or "").strip()
+    desc  = (data.get("description") or "").strip()
+    if not title or not desc:
         raise HTTPException(400, "title y description son obligatorios")
 
-    requirements  = (data.get("requirements") or "").strip()
+    reqs          = (data.get("requirements") or "").strip()
     expiration    =  data.get("expirationDate")
     label         =  data.get("label",  "manual")
     source        =  data.get("source", "admin")
@@ -145,15 +141,15 @@ async def create_admin_job(request: Request,
         except ValueError:
             raise HTTPException(400, "expirationDate inválida")
 
-    raw_user_id = data.get("userId")
+    raw_uid = data.get("userId")
     try:
-        user_id = int(raw_user_id)
-    except (TypeError, ValueError):
+        user_id = int(raw_uid)
+    except Exception:
         user_id = get_admin_id_by_email(admin_sub)
         if not user_id:
             raise HTTPException(400, "No se encontró admin en User")
 
-    embedding = generate_embedding(f"{title}\n{description}\n{requirements}")
+    embedding = generate_embedding(f"{title}\n{desc}\n{reqs}")
 
     conn = get_db_connection(); cur = conn.cursor()
     try:
@@ -167,13 +163,10 @@ async def create_admin_job(request: Request,
             email_col, phone_col = "contactEmail", "contactPhone"
 
         fields = [
-            "title", "description", "requirements", '"expirationDate"',
-            '"userId"', "embedding", "label", "source",
+            "title","description","requirements","\"expirationDate\"",
+            "\"userId\"","embedding","label","source"
         ]
-        values = [
-            title, description, requirements, exp_date,
-            user_id, embedding, label, source,
-        ]
+        values = [title,desc,reqs,exp_date,user_id,embedding,label,source]
         if has_is_paid:
             fields.append("is_paid"); values.append(is_paid)
         if email_col:
