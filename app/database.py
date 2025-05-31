@@ -25,7 +25,7 @@ load_dotenv()
 DB_NAME     = os.getenv("DBNAME",        os.getenv("POSTGRES_DB", "postgres"))
 DB_USER     = os.getenv("USER",          os.getenv("POSTGRES_USER", "postgres"))
 DB_PASS     = os.getenv("PASSWORD",      os.getenv("POSTGRES_PASSWORD", ""))
-DB_HOST     = os.getenv("HOST",          "localhost")
+DB_HOST     = os.getenv("HOST",          os.getenv("DB_HOST", "localhost"))
 DB_PORT     = os.getenv("DB_PORT",       "5432")
 DB_SSLMODE  = os.getenv("DB_SSLMODE",    "require")
 

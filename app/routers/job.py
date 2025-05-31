@@ -33,7 +33,7 @@ ALGORITHM  = os.getenv("ALGORITHM", "HS256")
 oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 oauth2_user  = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-router = APIRouter(tags=["job"])        # ⚠️  **SIN** prefix – lo añade main.py
+router = APIRouter(prefix="/api/job", tags=["job"]) 
 
 # ─────────────── Auth helpers ───────────────
 def get_current_admin_sub(token: str = Depends(oauth2_admin)) -> str:
