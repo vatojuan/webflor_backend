@@ -1,13 +1,14 @@
 # app/routers/job.py
-"""Endpoints públicos y de administración para ofertas (Job).
-
-• GET /api/job/                 → listado de ofertas vigentes
-• GET /api/job/list             → alias legado (frontend)
-• GET /api/job/my-applications  → postulaciones del usuario
-• POST /api/job/create-admin    → crear oferta (admin) + matching
-
-No depende de módulos externos; define su propio get_current_user.
 """
+Endpoints públicos y de administración para ofertas (Job).
+
+Incluye
+• GET  /api/job/                → listado de ofertas vigentes
+• GET  /api/job/list            → alias para listado de ofertas vigentes
+• GET  /api/job/my-applications → postulaciones del usuario logueado
+• POST /api/job/create-admin    → crear oferta como administrador + matching
+"""
+
 from __future__ import annotations
 
 import os, threading, traceback
@@ -15,36 +16,30 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import List, Optional
 
-import psycopg2, requests
+import requests
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
+from psycopg2.extensions import connection  # solo tipado
 
-from app.routers.match import run_matching_for_job
+from app.database       import get_db_connection          # ← conexión centralizada
+from app.routers.match  import run_matching_for_job
 
 load_dotenv()
 
-router = APIRouter(prefix="/api/job", tags=["job"])
-
-# ─────────────────── Configuración ───────────────────
+# -------------------------------------------------------------------
+# Configuración JWT
+# -------------------------------------------------------------------
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM  = os.getenv("ALGORITHM", "HS256")
 
-DB_PARAMS = {
-    "dbname":   os.getenv("DBNAME"),
-    "user":     os.getenv("USER"),
-    "password": os.getenv("PASSWORD"),
-    "host":     os.getenv("HOST"),
-    "port":     int(os.getenv("DB_PORT", 5432)),
-    "sslmode":  "require",
-}
-
-# OAuth2 – uno para admin, otro para usuarios
 oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 oauth2_user  = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-# ─────────────── Helpers de autenticación ───────────────
+router = APIRouter(tags=["job"])          # el prefijo /api/job lo añade main.py
+
+# ─────────────────── Autenticación ───────────────────
 def get_current_admin_sub(token: str = Depends(oauth2_admin)) -> str:
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
@@ -52,26 +47,29 @@ def get_current_admin_sub(token: str = Depends(oauth2_admin)) -> str:
         raise HTTPException(401, "Token inválido o expirado (admin)")
 
 def get_current_user(token: str = Depends(oauth2_user)):
-    """Devuelve un objeto con atributo .id basado en el JWT público."""
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        uid = int(payload.get("sub", ""))
-        return SimpleNamespace(id=uid)
-    except (ValueError, JWTError):
+        uid = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]).get("sub")
+        return SimpleNamespace(id=int(uid))
+    except Exception:
         raise HTTPException(401, "Token de usuario inválido o expirado")
 
-# ─────────────── Utilidades BD ───────────────
-def get_db_connection():
-    return psycopg2.connect(**DB_PARAMS)
-
+# ─────────────────── Helpers DB ───────────────────
 def get_admin_id_by_email(email: str) -> Optional[int]:
-    conn = get_db_connection(); cur = conn.cursor()
+    conn: connection = get_db_connection()
+    cur  = conn.cursor()
     cur.execute('SELECT id FROM "User" WHERE email=%s LIMIT 1;', (email,))
     row = cur.fetchone()
     cur.close(); conn.close()
     return row[0] if row else None
 
-# ─────────────── Embeddings (OpenAI) ───────────────
+def job_has_column(cur, col: str) -> bool:
+    cur.execute("""
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name='Job' AND column_name=%s LIMIT 1
+    """, (col,))
+    return bool(cur.fetchone())
+
+# ─────────────────── Embeddings (OpenAI) ───────────────────
 def generate_embedding(text: str) -> Optional[List[float]]:
     try:
         resp = requests.post(
@@ -87,19 +85,10 @@ def generate_embedding(text: str) -> Optional[List[float]]:
     except Exception:
         traceback.print_exc(); return None
 
-# ─────────────── Columnas opcionales ───────────────
-def job_has_column(cur, col: str) -> bool:
-    cur.execute("""
-        SELECT 1 FROM information_schema.columns
-         WHERE table_name = 'Job' AND column_name = %s
-         LIMIT 1
-    """, (col,))
-    return bool(cur.fetchone())
-
 # ══════════════════ Endpoints públicos ══════════════════
 @router.get("/", summary="Listar ofertas activas")
+@router.get("/list", include_in_schema=False)          # alias legacy
 async def list_jobs():
-    """Devuelve todas las ofertas no expiradas, ordenadas por id DESC."""
     conn = get_db_connection(); cur = conn.cursor()
     cur.execute("""
         SELECT id, title, description, requirements,
@@ -109,53 +98,43 @@ async def list_jobs():
          ORDER BY id DESC
     """)
     cols   = [c[0] for c in cur.description]
-    offers = [dict(zip(cols, row)) for row in cur.fetchall()]
+    offers = [dict(zip(cols, r)) for r in cur.fetchall()]
     cur.close(); conn.close()
     return {"offers": offers}
-
-@router.get("/list", summary="Alias legado para listado")
-async def list_jobs_alias():
-    return await list_jobs()
 
 @router.get("/my-applications", summary="Postulaciones del usuario")
 async def my_applications(current_user = Depends(get_current_user)):
     conn = get_db_connection(); cur = conn.cursor()
     cur.execute("""
-        SELECT id,
-               job_id AS "jobId",
-               status,
+        SELECT id, job_id AS "jobId", status,
                created_at AS "createdAt"
           FROM proposals
          WHERE user_id = %s
          ORDER BY created_at DESC
     """, (current_user.id,))
     cols = [c[0] for c in cur.description]
-    apps = [dict(zip(cols, row)) for row in cur.fetchall()]
+    apps = [dict(zip(cols, r)) for r in cur.fetchall()]
     cur.close(); conn.close()
     return {"applications": apps}
 
-# ══════════════════ Endpoint admin: crear oferta ══════════════════
-@router.post("/create-admin",
-             status_code=201,
+# ══════════ Endpoint admin: crear oferta + matching ══════════
+@router.post("/create-admin", status_code=201,
              dependencies=[Depends(oauth2_admin)])
-async def create_admin_job(
-    request: Request,
-    admin_sub: str = Depends(get_current_admin_sub)
-):
-    data          = await request.json()
-    title         = (data.get("title") or "").strip()
-    description   = (data.get("description") or "").strip()
+async def create_admin_job(request: Request,
+                           admin_sub: str = Depends(get_current_admin_sub)):
+    data = await request.json()
+    title, description = (data.get("title") or "").strip(), (data.get("description") or "").strip()
+    if not title or not description:
+        raise HTTPException(400, "title y description son obligatorios")
+
     requirements  = (data.get("requirements") or "").strip()
     expiration    =  data.get("expirationDate")
-    raw_user_id   =  data.get("userId")
     label         =  data.get("label",  "manual")
     source        =  data.get("source", "admin")
     is_paid       =  bool(data.get("isPaid", False))
     contact_email =  data.get("contactEmail") or data.get("contact_email")
     contact_phone =  data.get("contactPhone") or data.get("contact_phone")
 
-    if not title or not description:
-        raise HTTPException(400, "title y description son obligatorios")
     if source == "admin" and not contact_email:
         raise HTTPException(400, "Las ofertas del administrador requieren contactEmail")
 
@@ -164,14 +143,15 @@ async def create_admin_job(
         try:
             exp_date = datetime.fromisoformat(expiration.replace("Z", "+00:00"))
         except ValueError:
-            raise HTTPException(400, "expirationDate inválida (ISO-8601)")
+            raise HTTPException(400, "expirationDate inválida")
 
+    raw_user_id = data.get("userId")
     try:
         user_id = int(raw_user_id)
     except (TypeError, ValueError):
-        user_id = get_admin_id_by_email(admin_sub) or 0
-    if not user_id:
-        raise HTTPException(400, "No se encontró admin en User")
+        user_id = get_admin_id_by_email(admin_sub)
+        if not user_id:
+            raise HTTPException(400, "No se encontró admin en User")
 
     embedding = generate_embedding(f"{title}\n{description}\n{requirements}")
 
@@ -180,7 +160,6 @@ async def create_admin_job(
         has_is_paid       = job_has_column(cur, "is_paid")
         has_snake_contact = job_has_column(cur, "contact_email")
         has_camel_contact = job_has_column(cur, "contactEmail")
-
         email_col = phone_col = None
         if has_snake_contact:
             email_col, phone_col = "contact_email", "contact_phone"
@@ -201,27 +180,15 @@ async def create_admin_job(
             fields.extend([email_col, phone_col])
             values.extend([contact_email, contact_phone])
 
-        placeholders = ", ".join(["%s"] * len(fields))
-        cur.execute(
-            f'INSERT INTO "Job" ({", ".join(fields)}) VALUES ({placeholders}) RETURNING id;',
-            tuple(values)
-        )
-        job_id = cur.fetchone()[0]
-        conn.commit()
+        ph = ", ".join(["%s"] * len(fields))
+        cur.execute(f'INSERT INTO "Job" ({", ".join(fields)}) VALUES ({ph}) RETURNING id;',
+                    tuple(values))
+        job_id = cur.fetchone()[0]; conn.commit()
     except Exception as exc:
         conn.rollback(); traceback.print_exc()
         raise HTTPException(500, f"Error interno al crear oferta: {exc}")
     finally:
         cur.close(); conn.close()
 
-    threading.Thread(target=run_matching_for_job,
-                     args=(job_id,), daemon=True).start()
-
-    return {
-        "message": "Oferta creada",
-        "jobId":        job_id,
-        "label":        label,
-        "isPaid":       is_paid,
-        "contactEmail": contact_email,
-        "contactPhone": contact_phone,
-    }
+    threading.Thread(target=run_matching_for_job, args=(job_id,), daemon=True).start()
+    return {"message": "Oferta creada", "jobId": job_id}
