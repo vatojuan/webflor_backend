@@ -1,9 +1,10 @@
 # app/routers/job.py
 """Endpoints públicos y de administración para ofertas (Job).
 Incluye:
-  • GET /api/job/                  → listado de ofertas vigentes
-  • GET /api/job/my-applications   → postulaciones del usuario logueado
-  • POST /api/job/create-admin     → crear oferta como administrador + matching
+  • GET /api/job/                → listado de ofertas vigentes
+  • GET /api/job/list            → alias para listado de ofertas vigentes
+  • GET /api/job/my-applications → postulaciones del usuario logueado
+  • POST /api/job/create-admin   → crear oferta como administrador + matching
 No depende de módulos ausentes: define su propio helper `get_current_user` para JWT
 público.  Mantiene intacta la lógica existente de embeddings y matching.
 """
@@ -94,7 +95,8 @@ def generate_embedding(text: str) -> Optional[List[float]]:
         ).json()
         return resp["data"][0]["embedding"]
     except Exception:
-        traceback.print_exc(); return None
+        traceback.print_exc()
+        return None
 
 
 # ─────────────────── Utilidad columnas opcionales ───────────────────
@@ -114,14 +116,27 @@ def job_has_column(cur, col: str) -> bool:
 
 @router.get("/", summary="Listar ofertas activas")
 async def list_jobs():
+    """
+    Devuelve todas las ofertas no expiradas, ordenadas por id DESC.
+    URIs válidos para el front:
+      • GET /api/job/     (como antes)
+      • GET /api/job/list (alias exacto, para no romper el JS)
+    """
     conn = get_db_connection(); cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, title, description, requirements,
-               "expirationDate", "userId", source, label
-          FROM public."Job"
-         WHERE "expirationDate" IS NULL OR "expirationDate" > NOW()
-         ORDER BY id DESC
+        SELECT
+          id,
+          title,
+          description,
+          requirements,
+          "expirationDate",
+          "userId",
+          source,
+          label
+        FROM public."Job"
+        WHERE "expirationDate" IS NULL OR "expirationDate" > NOW()
+        ORDER BY id DESC
         """
     )
     cols   = [c[0] for c in cur.description]
@@ -130,17 +145,33 @@ async def list_jobs():
     return {"offers": offers}
 
 
+@router.get("/list", summary="Alias: Listar ofertas activas")
+async def list_jobs_alias():
+    """Alias exacto para GET /api/job/, así el front que haga /api/job/list deja de fallar."""
+    return await list_jobs()
+
+
 @router.get("/my-applications", summary="Postulaciones del usuario")
 async def my_applications(current_user = Depends(get_current_user)):
+    """
+    Devuelve las propuestas que el usuario autenticado ha realizado.
+    Recuerda enviar:
+      Authorization: Bearer <token de usuario>
+    """
     user_id = current_user.id
     conn = get_db_connection(); cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, job_id AS "jobId", status, created_at AS "createdAt"
-          FROM proposals
-         WHERE user_id = %s
-         ORDER BY created_at DESC
-        """, (user_id,)
+        SELECT
+          id,
+          job_id AS "jobId",
+          status,
+          created_at AS "createdAt"
+        FROM proposals
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+        """,
+        (user_id,)
     )
     cols = [c[0] for c in cur.description]
     apps = [dict(zip(cols, row)) for row in cur.fetchall()]
@@ -152,6 +183,10 @@ async def my_applications(current_user = Depends(get_current_user)):
 
 @router.post("/create-admin", status_code=201, dependencies=[Depends(oauth2_admin)])
 async def create_admin_job(request: Request, admin_sub: str = Depends(get_current_admin_sub)):
+    """
+    Crea una oferta nueva, genera su embedding y dispara matching asíncrono.
+    Sólo accesible para admins (usa OAuth2 admin-login).
+    """
     data          = await request.json()
     title         = (data.get("title") or "").strip()
     description   = (data.get("description") or "").strip()
@@ -177,7 +212,7 @@ async def create_admin_job(request: Request, admin_sub: str = Depends(get_curren
         except ValueError:
             raise HTTPException(400, "expirationDate inválida (ISO-8601)")
 
-    # User asociado a la oferta
+    # Determinar user_id
     try:
         user_id = int(raw_user_id)
     except (TypeError, ValueError):
@@ -222,7 +257,7 @@ async def create_admin_job(request: Request, admin_sub: str = Depends(get_curren
         job_id = cur.fetchone()[0]
         conn.commit()
     except Exception as exc:
-        conn.rollback(); traceback.print_exc();
+        conn.rollback(); traceback.print_exc()
         raise HTTPException(500, f"Error interno al crear oferta: {exc}")
     finally:
         cur.close(); conn.close()
