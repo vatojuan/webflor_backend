@@ -1,121 +1,131 @@
-# app/routers/match.py
-"""Motor de coincidencias (matching) entre ofertas y usuarios.
-- Calcula similitud coseno sobre los embeddings almacenados en pgvector
-- Inserta los resultados en `matches`
-- Envía al candidato un e‑mail de notificación usando `send_match_email`
-Todo se realiza con SQL crudo para máxima velocidad; no rompe ningún flujo existente.
+"""
+Matchings (coincidencias Job ↔ User)
+
+• GET  /api/match/job/{job_id}/match     – calcular y devolver scores   (ya existía)
+• GET  /api/match/user/{user_id}/match   – idem desde el lado usuario  (ya existía)
+
+• GET  /api/match/admin                  – **NUEVO**  listado de matchings para el panel admin
+• POST /api/match/resend/{mid}           – **NUEVO**  re-enviar e-mail / WhatsApp de un matching
 """
 
 from __future__ import annotations
 
-import logging
-from typing import List, Tuple
+import os, logging, traceback
+from datetime import datetime
+from typing import List, Dict, Any, Optional
 
-import numpy as np
-from fastapi import APIRouter, HTTPException
-from pgvector.psycopg2 import register_vector
+import psycopg2
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import OAuth2PasswordBearer
+from jose import jwt, JWTError
 
-from app.database import get_db_connection
-from app.email_utils import send_match_email
+from app.database   import get_db_connection
+from app.routers.proposal import send_mail, send_whatsapp           # re-usamos helpers
 
-# ───────────────── Configuración ─────────────────
-router = APIRouter(prefix="/api/match", tags=["match"])
+# ─────────────────── Config / auth ───────────────────
+SECRET_KEY = os.getenv("SECRET_KEY", "")
+ALGORITHM  = os.getenv("ALGORITHM", "HS256")
+
+oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
+
+def get_current_admin(token: str = Depends(oauth2_admin)) -> str:
+    if not token:
+        raise HTTPException(401, "Token requerido")
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]).get("sub") or ""
+    except JWTError:
+        raise HTTPException(401, "Token inválido")
+
+# ─────────────────── Router ───────────────────────────
+router = APIRouter(prefix="/api/match", tags=["matchings"])
+
 logger = logging.getLogger(__name__)
 
-SIMILARITY_THRESHOLD: float = 0.80  # ≥ 0.80 = 80 % de similitud
+# ───────────── Helper SQL → dict ─────────────
+def qdict(cur) -> List[Dict[str,Any]]:
+    cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
 
-# ───────────────── Utilidades ─────────────────
-
-def cosine_similarity(a: List[float], b: List[float]) -> float:
-    """Devuelve la similitud coseno entre dos vectores Python lists."""
-    a_arr = np.asarray(a, dtype=float)
-    b_arr = np.asarray(b, dtype=float)
-    if a_arr.size == 0 or b_arr.size == 0:
-        return 0.0
-    return float(np.dot(a_arr, b_arr) / (np.linalg.norm(a_arr) * np.linalg.norm(b_arr)))
-
-
-def _fetch_embeddings(cur, table: str, id_col: str, vec_col: str) -> List[Tuple[int, List[float]]]:
-    cur.execute(f'SELECT {id_col}, {vec_col} FROM "{table}" WHERE {vec_col} IS NOT NULL;')
-    return cur.fetchall()
-
-
-def _upsert_match(cur, job_id: int, user_id: int, score: float) -> None:
-    cur.execute(
-        """
-        INSERT INTO matches (job_id, user_id, score, sent_at, status)
-        VALUES (%s, %s, %s, NOW(), 'sent')
-        ON CONFLICT (job_id, user_id) DO NOTHING;
-        """,
-        (job_id, user_id, score),
-    )
-
-
-def _notify_user(cur, job_id: int, user_id: int, score: float) -> None:
-    cur.execute('SELECT email, name FROM "User" WHERE id = %s;', (user_id,))
-    email, name = cur.fetchone()
-    cur.execute('SELECT title, description FROM "Job" WHERE id = %s;', (job_id,))
-    title, description = cur.fetchone()
-    send_match_email(email, name, title, description, score)
-
-# ───────────────── Núcleo de matching ─────────────────
-
-def run_matching_for_job(job_id: int) -> int:
-    """Compara una oferta contra todos los usuarios y envía notificaciones."""
-    conn = get_db_connection(); register_vector(conn); cur = conn.cursor()
+# ═════════════════════════════════════════════
+# 🆕  PANELES DE ADMINISTRACIÓN
+# ═════════════════════════════════════════════
+@router.get("/admin", summary="Listado de matchings", dependencies=[Depends(get_current_admin)])
+def list_matchings():
+    """
+    Devuelve todos los registros de la tabla **matches** con los datos que
+    el front espera (job.title, user.email, score, etc.).
+    """
+    conn = cur = None
     try:
-        cur.execute('SELECT embedding FROM "Job" WHERE id = %s;', (job_id,))
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute("""
+            SELECT
+              m.id,
+              m.score,
+              m.sent_at,
+              m.status,
+              json_build_object('id',j.id,'title',j.title)  AS job,
+              json_build_object('id',u.id,'email',u.email) AS user
+            FROM matches m
+            JOIN "Job"  j ON j.id = m.job_id
+            JOIN "User" u ON u.id = m.user_id
+            ORDER BY m.sent_at DESC NULLS FIRST, m.id DESC
+        """)
+        return qdict(cur)
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+# ═════════════════════════════════════════════
+# 🆕  REENVIAR MATCHING
+# ═════════════════════════════════════════════
+@router.post("/resend/{mid}", summary="Re-enviar e-mail/WhatsApp de un matching",
+             dependencies=[Depends(get_current_admin)])
+def resend_matching(mid: int):
+    conn = cur = None
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+
+        # Datos principales
+        cur.execute("""
+            SELECT m.score, j.title, j.contact_email, j.contactEmail,
+                   j.contact_phone, j.contactPhone,
+                   u.name, u.email, u."cvUrl"
+              FROM matches m
+              JOIN "Job"  j ON j.id = m.job_id
+              JOIN "User" u ON u.id = m.user_id
+             WHERE m.id = %s
+        """, (mid,))
         row = cur.fetchone()
         if not row:
-            raise HTTPException(404, 'Oferta no encontrada')
-        job_vec = row[0]
+            raise HTTPException(404, "Matching no encontrado")
 
-        matches = 0
-        for user_id, user_vec in _fetch_embeddings(cur, 'User', 'id', 'embedding'):
-            score = cosine_similarity(job_vec, user_vec)
-            if score >= SIMILARITY_THRESHOLD:
-                _upsert_match(cur, job_id, user_id, score)
-                _notify_user(cur, job_id, user_id, score)
-                matches += 1
-        conn.commit(); return matches
-    except Exception as exc:
-        conn.rollback(); logger.exception('Error matching oferta→usuarios')
-        raise HTTPException(500, f'Error interno: {exc}')
+        score, title,\
+        c_email1, c_email2, c_phone1, c_phone2,\
+        cand_name, cand_mail, cv_url = row
+
+        dest_email  = c_email1 or c_email2
+        dest_phone  = c_phone1 or c_phone2
+        subject     = f"🔄 Reenvío – Matching {cand_name} ↔ «{title}»"
+        body        = (f"El candidato {cand_name} ({cand_mail}) coincide con «{title}» "
+                       f"con un score de {round(score*100,1)} %.")
+
+        if not dest_email:
+            raise HTTPException(400, "Oferta sin e-mail de contacto")
+
+        send_mail(dest_email, subject, body, cv_url)
+        send_whatsapp(dest_phone, body)
+
+        cur.execute("UPDATE matches SET sent_at = NOW(), status='resent' WHERE id = %s", (mid,))
+        conn.commit()
+        logger.info("Matching %d reenviado", mid)
+        return {"message": "reenviado"}
+    except HTTPException:
+        raise
+    except Exception:
+        if conn: conn.rollback()
+        logger.exception("Error reenviando matching %d", mid)
+        raise HTTPException(500, "Error interno")
     finally:
-        cur.close(); conn.close()
-
-
-def run_matching_for_user(user_id: int) -> int:
-    """Compara un usuario contra todas las ofertas y envía notificaciones."""
-    conn = get_db_connection(); register_vector(conn); cur = conn.cursor()
-    try:
-        cur.execute('SELECT embedding FROM "User" WHERE id = %s;', (user_id,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(404, 'Usuario no encontrado')
-        user_vec = row[0]
-
-        matches = 0
-        for job_id, job_vec in _fetch_embeddings(cur, 'Job', 'id', 'embedding'):
-            score = cosine_similarity(user_vec, job_vec)
-            if score >= SIMILARITY_THRESHOLD:
-                _upsert_match(cur, job_id, user_id, score)
-                _notify_user(cur, job_id, user_id, score)
-                matches += 1
-        conn.commit(); return matches
-    except Exception as exc:
-        conn.rollback(); logger.exception('Error matching usuario→ofertas')
-        raise HTTPException(500, f'Error interno: {exc}')
-    finally:
-        cur.close(); conn.close()
-
-# ───────────────── Endpoints manuales ─────────────────
-
-@router.post('/job/{job_id}/match', status_code=202, summary='Matching oferta→usuarios')
-def api_match_job(job_id: int):
-    return {"matches": run_matching_for_job(job_id)}
-
-
-@router.post('/user/{user_id}/match', status_code=202, summary='Matching usuario→ofertas')
-def api_match_user(user_id: int):
-    return {"matches": run_matching_for_user(user_id)}
+        if cur: cur.close()
+        if conn: conn.close()
