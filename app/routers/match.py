@@ -240,30 +240,23 @@ def list_matchings():
 )
 def resend_matching(mid: int):
     """
-    Vuelve a enviar el matching identificado por `mid` al contacto de la oferta,
-    usando la plantilla automática y actualizando sent_at y status.
+    Vuelve a enviar el matching identificado por `mid` al candidato correspondiente,
+    usando la plantilla 'empleado' y actualizando sent_at y status.
     """
     conn = cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Obtener nombres de columnas de contacto en Job
-        email_c, phone_c = _job_contact_columns(cur)
-        if not email_c:
-            raise HTTPException(500, "No se encontró columna de e-mail en Job")
-
-        # Obtener datos del matching
+        # Obtener datos del matching + candidato + oferta
         cur.execute(
-            f"""
+            """
             SELECT m.score,
-                   j.id   AS job_id,
-                   j.title,
-                   j.{email_c}     AS dest_email,
-                   j.{phone_c}     AS dest_phone,
-                   u.name           AS cand_name,
-                   u.email          AS cand_email,
-                   u."cvUrl"        AS cand_cv
+                   j.id        AS job_id,
+                   j.title     AS job_title,
+                   u.name      AS cand_name,
+                   u.email     AS cand_email,
+                   u."cvUrl"   AS cand_cv
               FROM matches m
               JOIN "Job" j ON j.id = m.job_id
               JOIN "User" u ON u.id = m.user_id
@@ -275,25 +268,25 @@ def resend_matching(mid: int):
         if not row:
             raise HTTPException(404, "Matching no encontrado")
 
-        score, job_id_fk, job_title, dest_email, dest_phone, cand_name, cand_email, cand_cv = row
-        if not dest_email:
-            raise HTTPException(400, "Oferta sin e-mail de contacto")
+        score, job_id_fk, job_title, cand_name, cand_email, cand_cv = row
+        if not cand_email:
+            raise HTTPException(400, "Candidato sin e-mail registrado")
 
-        # Obtener plantilla automática predeterminada
-        tpl_auto = _get_default_tpl(cur, "automatic")
+        # Obtener plantilla predeterminada tipo "empleado"
+        tpl_emp = _get_default_tpl(cur, "empleado")
         apply_link = f"{os.getenv('FRONTEND_URL')}/jobs/{job_id_fk}"
         ctx = {
             "applicant_name": cand_name,
             "job_title": job_title,
-            "score": f"{round(score * 100, 1)} %",
             "cv_url": cand_cv or "",
-            "created_at": "",
-            "apply_link": apply_link
+            "score": f"{round(score * 100, 1)} %",
+            "apply_link": apply_link,
+            "created_at": ""
         }
-        msg = _apply_tpl(tpl_auto, ctx)
+        msg = _apply_tpl(tpl_emp, ctx)
 
-        send_mail(dest_email, msg["subject"], msg["body"], cand_cv)
-        send_whatsapp(dest_phone, msg["body"])
+        send_mail(cand_email, msg["subject"], msg["body"], cand_cv)
+        send_whatsapp(None, msg["body"])
 
         cur.execute(
             "UPDATE matches SET sent_at = NOW(), status = 'resent' WHERE id = %s",
