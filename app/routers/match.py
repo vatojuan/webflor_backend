@@ -4,30 +4,32 @@ Matchings (Job ↔ User)
 
 • GET  /api/match/job/{job_id}/match      → preview (no escribe BD)
 • GET  /api/match/user/{user_id}/match    → preview inverso
-• GET  /api/match/admin                   → panel admin
+• GET  /api/match/admin                   → panel admin (solo score >= 0.85)
 • POST /api/match/resend/{mid}            → reenviar mail/WhatsApp
 
-La rutina `run_matching_for_job(job_id)` se invoca al crear una oferta
-(job o job-admin). Calcula los scores (pgvector) y guarda en `matches`
-con status = pending.  El envío real se delega al módulo *proposal*
-cuando el candidato hace click en “Postularme”.
+La rutina `run_matching_for_job(job_id)` se invoca al crear o actualizar una oferta.
+Calcula los scores (pgvector) y guarda en `matches`. Después, envía automáticamente
+e-mails a los candidatos cuyo score >= 0.85 usando la plantilla de tipo "empleado".
+Los que queden con score < 0.85 permanecen en status='pending' sin envío.
 """
 from __future__ import annotations
 
-import os, logging, traceback
-from typing import Any, Dict, List
+import os
+import logging
+import traceback
+from typing import Any, Dict, List, Tuple
 
 import psycopg2
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 
-from app.database         import get_db_connection
+from app.database import get_db_connection
 from app.routers.proposal import send_mail, send_whatsapp
 
 # ─────────────────── Config & auth ───────────────────
 SECRET_KEY = os.getenv("SECRET_KEY", "")
-ALGORITHM  = os.getenv("ALGORITHM", "HS256")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
 
 oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
@@ -40,191 +42,360 @@ def get_current_admin(token: str = Depends(oauth2_admin)) -> str:
 router = APIRouter(prefix="/api/match", tags=["matchings"])
 logger = logging.getLogger(__name__)
 
+
 # ───────────── helpers util ─────────────
-def _cur_to_dicts(cur) -> List[Dict[str,Any]]:
+def _cur_to_dicts(cur) -> List[Dict[str, Any]]:
     cols = [c[0] for c in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
-def _get_default_tpl(cur, tpl_type: str) -> Dict[str,str]:
-    cur.execute("""
+def _get_default_tpl(cur, tpl_type: str) -> Dict[str, str]:
+    """Devuelve la plantilla predeterminada para el tipo dado."""
+    cur.execute(
+        """
         SELECT subject, body
           FROM proposal_templates
          WHERE type = %s AND is_default = TRUE
          LIMIT 1
-    """, (tpl_type,))
+        """,
+        (tpl_type,),
+    )
     row = cur.fetchone()
     return {"subject": row[0], "body": row[1]} if row else {}
 
-def _apply_tpl(tpl: Dict[str,str], ctx: Dict[str,str]) -> Dict[str,str]:
-    subj, body = tpl.get("subject",""), tpl.get("body","")
-    for k,v in ctx.items():
+def _apply_tpl(tpl: Dict[str, str], ctx: Dict[str, str]) -> Dict[str, str]:
+    """Reemplaza placeholders en subject y body basados en ctx."""
+    subj, body = tpl.get("subject", ""), tpl.get("body", "")
+    for k, v in ctx.items():
         subj = subj.replace(f"{{{{{k}}}}}", v)
         body = body.replace(f"{{{{{k}}}}}", v)
     return {"subject": subj or "(sin asunto)", "body": body}
 
+def _job_contact_columns(cur) -> Tuple[str, str]:
+    """
+    Retorna los nombres de columna para e-mail y teléfono de contacto de Job,
+    considerando posible snake_case o camelCase.
+    """
+    cur.execute("""
+        SELECT column_name
+          FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'Job';
+    """)
+    cols = {r[0] for r in cur.fetchall()}
+    email_c = "contact_email" if "contact_email" in cols else \
+              "contactEmail" if "contactEmail" in cols else None
+    phone_c = "contact_phone" if "contact_phone" in cols else \
+              "contactPhone" if "contactPhone" in cols else None
+    return email_c, phone_c
+
+
 # ═══════════ Matching batch (oferta nueva) ═══════════
 def run_matching_for_job(job_id: int) -> None:
     """
-    Recalcula todos los matchings Job→User y los deja en `matches`
-    con status='pending'.  El envío al candidato sucede sólo cuando
-    éste acepta / se postula.
+    Recalcula todos los matchings Job→User:
+      1) Borra matchings previos de esta oferta.
+      2) Inserta nuevos con status='pending'.
+      3) Selecciona aquellos con score >= 0.85 y les envía e-mail usando plantilla 'empleado',
+         marcándolos luego como status='sent', con sent_at=NOW().
+      4) Deja el resto con status='pending' sin envío.
     """
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-        # embedding de la oferta
-        cur.execute('SELECT embedding FROM "Job" WHERE id=%s AND embedding IS NOT NULL',
-                    (job_id,))
+        # 1) Obtener embedding de la oferta
+        cur.execute(
+            'SELECT embedding FROM "Job" WHERE id = %s AND embedding IS NOT NULL',
+            (job_id,),
+        )
         row = cur.fetchone()
         if not row:
             logger.info("run_matching_for_job: oferta %d sin embedding, omito.", job_id)
             return
         job_emb = row[0]
 
-        # borrar matchings viejos
+        # 2) Borrar matchings previos
         cur.execute("DELETE FROM matches WHERE job_id = %s", (job_id,))
 
-        # insertar nuevos (cast explícito a vector)
-        cur.execute("""
+        # 3) Insertar todos los nuevos matchings con status='pending'
+        cur.execute(
+            """
             INSERT INTO matches (job_id, user_id, score, status)
             SELECT
-              %s,
-              u.id,
-              (1 - (u.embedding::vector <=> %s::vector)) AS score,
-              'pending'
+              %s AS job_id,
+              u.id AS user_id,
+              (1.0 - (u.embedding::vector <=> %s::vector)) AS score,
+              'pending' AS status
             FROM "User" u
             WHERE u.embedding IS NOT NULL
-        """, (job_id, job_emb))
+            """,
+            (job_id, job_emb),
+        )
         conn.commit()
-        logger.info("run_matching_for_job: %d filas insertadas para job %d",
-                    cur.rowcount, job_id)
+        logger.info(
+            "run_matching_for_job: %d filas insertadas para job %d",
+            cur.rowcount, job_id
+        )
+
+        # 4) Para cada matching con score >= 0.85, enviar e-mail y marcar como 'sent'
+        cur.execute(
+            """
+            SELECT m.id, m.user_id, m.score,
+                   u.name, u.email, u."cvUrl", j.title, j.id AS job_id
+              FROM matches m
+              JOIN "User" u ON u.id = m.user_id
+              JOIN "Job" j ON j.id = m.job_id
+             WHERE m.job_id = %s AND m.score >= %s
+            """,
+            (job_id, 0.85),
+        )
+        high_matches = cur.fetchall()
+
+        # Obtener plantilla predeterminada tipo "empleado"
+        tpl_emp = _get_default_tpl(cur, "empleado")
+
+        for m_id, user_id, score, cand_name, cand_email, cv_url, job_title, job_id_fk in high_matches:
+            if not cand_email:
+                continue  # si no hay e-mail de candidato, omitimos
+
+            # Construir contexto con placeholders
+            apply_link = f"{os.getenv('FRONTEND_URL')}/jobs/{job_id_fk}"
+            ctx = {
+                "applicant_name": cand_name,
+                "job_title": job_title,
+                "cv_url": cv_url or "",
+                "score": f"{round(score * 100, 1)} %",
+                "apply_link": apply_link,
+                "created_at": ""
+            }
+            msg = _apply_tpl(tpl_emp, ctx)
+
+            try:
+                send_mail(cand_email, msg["subject"], msg["body"], cv_url)
+                send_whatsapp(None, msg["body"])  # sin WhatsApp por defecto para candidato
+                cur.execute(
+                    "UPDATE matches SET status = 'sent', sent_at = NOW() WHERE id = %s",
+                    (m_id,),
+                )
+            except Exception as e:
+                logger.exception("Error enviando match id=%d: %s", m_id, e)
+
+        conn.commit()
 
     except Exception:
-        if conn: conn.rollback()
+        if conn:
+            conn.rollback()
         logger.exception("run_matching_for_job error job_id=%d", job_id)
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
 
 # ═══════════ Listado admin ═══════════
-@router.get("/admin", dependencies=[Depends(get_current_admin)],
-            summary="Listado de matchings guardados")
+@router.get(
+    "/admin",
+    dependencies=[Depends(get_current_admin)],
+    summary="Listado de matchings guardados (solo score >= 0.85)",
+)
 def list_matchings():
+    """
+    Devuelve todos los matchings con score >= 0.85 para el panel admin,
+    incluyendo datos de job y user para mostrar en frontend.
+    """
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("""
-            SELECT m.id, m.score, m.sent_at, m.status,
-                   json_build_object('id',j.id,'title',j.title) AS job,
-                   json_build_object('id',u.id,'email',u.email) AS user
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT m.id,
+                   m.score,
+                   m.sent_at,
+                   m.status,
+                   json_build_object('id', j.id, 'title', j.title) AS job,
+                   json_build_object('id', u.id, 'email', u.email)   AS user
               FROM matches m
-              JOIN "Job"  j ON j.id = m.job_id
+              JOIN "Job" j ON j.id = m.job_id
               JOIN "User" u ON u.id = m.user_id
+             WHERE m.score >= %s
              ORDER BY m.sent_at DESC NULLS FIRST, m.id DESC
-        """)
+            """,
+            (0.85,),
+        )
         return _cur_to_dicts(cur)
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
-# ═══════════ Reenviar a empleador ═══════════
-@router.post("/resend/{mid}", dependencies=[Depends(get_current_admin)],
-             summary="Reenviar mail/WhatsApp de un matching")
+
+# ═══════════ Reenviar matching (solo admin) ═══════════
+@router.post(
+    "/resend/{mid}",
+    dependencies=[Depends(get_current_admin)],
+    summary="Reenviar mail/WhatsApp de un matching",
+)
 def resend_matching(mid: int):
+    """
+    Vuelve a enviar el matching identificado por `mid` al contacto de la oferta,
+    usando la plantilla automática y actualizando sent_at y status.
+    """
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-        cur.execute("""
+        # Obtener nombres de columnas de contacto en Job
+        email_c, phone_c = _job_contact_columns(cur)
+        if not email_c:
+            raise HTTPException(500, "No se encontró columna de e-mail en Job")
+
+        # Obtener datos del matching
+        cur.execute(
+            f"""
             SELECT m.score,
-                   j.title, COALESCE(j.contact_email,j."contactEmail"),
-                   COALESCE(j.contact_phone,j."contactPhone"),
-                   u.name, u.email, u."cvUrl"
+                   j.id   AS job_id,
+                   j.title,
+                   j.{email_c}     AS dest_email,
+                   j.{phone_c}     AS dest_phone,
+                   u.name           AS cand_name,
+                   u.email          AS cand_email,
+                   u."cvUrl"        AS cand_cv
               FROM matches m
-              JOIN "Job"  j ON j.id = m.job_id
+              JOIN "Job" j ON j.id = m.job_id
               JOIN "User" u ON u.id = m.user_id
              WHERE m.id = %s
-        """, (mid,))
+            """,
+            (mid,),
+        )
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "Matching no encontrado")
 
-        score, title, dest_email, dest_phone, cand_name, cand_email, cv_url = row
+        score, job_id_fk, job_title, dest_email, dest_phone, cand_name, cand_email, cand_cv = row
         if not dest_email:
-            raise HTTPException(400, "Oferta sin email de contacto")
+            raise HTTPException(400, "Oferta sin e-mail de contacto")
 
-        tpl = _get_default_tpl(cur, "automatic") or {}
-        ctx = dict(applicant_name=cand_name,
-                   job_title=title,
-                   score=f"{round(score*100,1)} %",
-                   cv_url=cv_url or "",
-                   created_at="")
-        msg = _apply_tpl(tpl, ctx)
+        # Obtener plantilla automática predeterminada
+        tpl_auto = _get_default_tpl(cur, "automatic")
+        apply_link = f"{os.getenv('FRONTEND_URL')}/jobs/{job_id_fk}"
+        ctx = {
+            "applicant_name": cand_name,
+            "job_title": job_title,
+            "score": f"{round(score * 100, 1)} %",
+            "cv_url": cand_cv or "",
+            "created_at": "",
+            "apply_link": apply_link
+        }
+        msg = _apply_tpl(tpl_auto, ctx)
 
-        send_mail(dest_email, msg["subject"], msg["body"], cv_url)
+        send_mail(dest_email, msg["subject"], msg["body"], cand_cv)
         send_whatsapp(dest_phone, msg["body"])
 
-        cur.execute("UPDATE matches SET sent_at=NOW(), status='resent' WHERE id=%s",
-                    (mid,))
+        cur.execute(
+            "UPDATE matches SET sent_at = NOW(), status = 'resent' WHERE id = %s",
+            (mid,),
+        )
         conn.commit()
         return {"message": "reenviado"}
-    except HTTPException: raise
+
+    except HTTPException:
+        raise
     except Exception:
-        if conn: conn.rollback()
+        if conn:
+            conn.rollback()
         logger.exception("Error reenviando matching %d", mid)
         raise HTTPException(500, "Error interno")
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
 
 # ═══════════ Previews (sin persistir) ═══════════
 @router.get("/job/{job_id}/match", summary="Preview usuarios para un Job")
 def match_for_job(job_id: int):
+    """
+    Retorna lista de usuarios con sus puntajes frente a la oferta, sin persistir.
+    """
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute('SELECT embedding FROM "Job" WHERE id=%s AND embedding IS NOT NULL',
-                    (job_id,))
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            'SELECT embedding FROM "Job" WHERE id = %s AND embedding IS NOT NULL',
+            (job_id,),
+        )
         row = cur.fetchone()
-        if not row: raise HTTPException(404,"Oferta sin embedding")
+        if not row:
+            raise HTTPException(404, "Oferta sin embedding")
         job_emb = row[0]
 
-        cur.execute("""
+        cur.execute(
+            """
             SELECT u.id, u.email,
-                   (1 - (u.embedding::vector <=> %s::vector)) AS score
+                   (1.0 - (u.embedding::vector <=> %s::vector)) AS score
               FROM "User" u
              WHERE u.embedding IS NOT NULL
              ORDER BY score DESC
              LIMIT 100
-        """, (job_emb,))
-        return {"matches":[{"userId":r[0],"email":r[1],"score":float(r[2])}
-                           for r in cur.fetchall()]}
+            """,
+            (job_emb,),
+        )
+        return {
+            "matches": [
+                {"userId": r[0], "email": r[1], "score": float(r[2])}
+                for r in cur.fetchall()
+            ]
+        }
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
-@router.get("/user/{user_id}/match", summary="Preview ofertas para un User")
+
+@router.get("/user/{user_id}/match", summary="Preview ofertas para un Usuario")
 def match_for_user(user_id: int):
+    """
+    Retorna lista de ofertas con sus puntajes frente a un usuario, sin persistir.
+    """
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute('SELECT embedding FROM "User" WHERE id=%s AND embedding IS NOT NULL',
-                    (user_id,))
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            'SELECT embedding FROM "User" WHERE id = %s AND embedding IS NOT NULL',
+            (user_id,),
+        )
         row = cur.fetchone()
-        if not row: raise HTTPException(404,"Usuario sin embedding")
+        if not row:
+            raise HTTPException(404, "Usuario sin embedding")
         user_emb = row[0]
 
-        cur.execute("""
+        cur.execute(
+            """
             SELECT j.id, j.title,
-                   (1 - (j.embedding::vector <=> %s::vector)) AS score
+                   (1.0 - (j.embedding::vector <=> %s::vector)) AS score
               FROM "Job" j
              WHERE j.embedding IS NOT NULL
              ORDER BY score DESC
              LIMIT 100
-        """, (user_emb,))
-        return {"matches":[{"jobId":r[0],"title":r[1],"score":float(r[2])}
-                           for r in cur.fetchall()]}
+            """,
+            (user_emb,),
+        )
+        return {
+            "matches": [
+                {"jobId": r[0], "title": r[1], "score": float(r[2])}
+                for r in cur.fetchall()
+            ]
+        }
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
