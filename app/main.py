@@ -7,8 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 
-from apscheduler.schedulers.background import BackgroundScheduler
-
 # ──────────── Routers públicos ────────────
 from app.routers import (
     auth as public_auth,
@@ -45,8 +43,6 @@ from app.routers.apply           import router as apply_router
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM  = os.getenv("ALGORITHM", "HS256")
-FRONTEND_URL = os.getenv("FRONTEND_URL")
-DATABASE_URL = os.getenv("DATABASE_URL")  # Asume string de conexión PostgreSQL
 
 app = FastAPI(
     proxy_headers=True,
@@ -88,42 +84,6 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
         return sub
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido o expirado")
-
-# ─────────────────── Función para limpiar matchings expirados ───────────────────
-def cleanup_expired_matchings():
-    """
-    Elimina de la tabla 'matches' aquellas filas cuya oferta ya expiró.
-    """
-    import psycopg2
-    conn = None
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("""
-            DELETE FROM matches
-             WHERE job_id IN (
-               SELECT id
-                 FROM public."Job"
-                WHERE "expirationDate" IS NOT NULL
-                  AND "expirationDate" < NOW()
-             );
-        """)
-        conn.commit()
-        print(f"🗑️  Eliminados {cur.rowcount} matchings expirados")
-        cur.close()
-    except Exception as e:
-        print("❌ Error cleanup_expired_matchings:", e)
-        if conn:
-            conn.rollback()
-    finally:
-        if conn:
-            conn.close()
-
-# ─────────────────── Scheduler ───────────────────
-scheduler = BackgroundScheduler()
-# Ejecutar limpieza cada 6 horas (ejemplo)
-scheduler.add_job(cleanup_expired_matchings, "interval", hours=6, next_run_time=None)
-scheduler.start()
 
 # ─────────────────── Routers públicos ───────────────────
 for r in (
