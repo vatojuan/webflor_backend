@@ -1,17 +1,19 @@
+# app/routers/cv_processing.py
 import io
+import random
+import string
 import re
 import os
 import json
 import uuid
 import psycopg2
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Depends
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form
 from google.cloud import storage
 from PyPDF2 import PdfReader
 from openai import OpenAI
 from app.email_utils import send_confirmation_email
-from app.routers.match import run_matching_for_user  # Para recalcular matchings
-from app.routers.auth import get_current_user          # Dependencia que devuelve el usuario logueado
+from app.routers.match import run_matching_for_user  # <-- Importación añadida
 
 load_dotenv()
 
@@ -36,135 +38,133 @@ def get_db_connection():
 
 router = APIRouter(prefix="/cv", tags=["cv"])
 
-def extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    """Extrae el texto completo de un PDF sin guardarlo en disco."""
+def extract_text_from_pdf(pdf_bytes):
+    """Extrae el texto completo de un PDF en formato bytes sin necesidad de guardarlo en disco."""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
-        text = "".join([page.extract_text() or "" for page in reader.pages])
+        text = " ".join([page.extract_text() or "" for page in reader.pages])
         return text.strip()
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error extrayendo texto del PDF: {e}")
+        raise Exception(f"Error extrayendo texto del PDF: {e}")
 
+# --- Versión corregida de extract_email() ---
 COMMON_TLDS = {"com", "org", "net", "edu", "gov", "io", "co", "us", "ar", "comar"}
 
-def extract_email(text: str) -> str | None:
+def extract_email(text):
     """
     Extrae el primer email del texto y recorta cualquier texto extra pegado al TLD,
-    apoyándose en la lista COMMON_TLDS.
+    usando una lista de TLDs comunes para determinar dónde cortar.
     """
-    cleaned = re.sub(r'[\r\n\t]+', ' ', text)
-    cleaned = re.sub(r'\s{2,}', ' ', cleaned)
+    cleaned_text = re.sub(r'[\r\n\t]+', ' ', text)
+    cleaned_text = re.sub(r'\s{2,}', ' ', cleaned_text)
     pattern = r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}[A-Za-z]*'
-    match = re.search(pattern, cleaned)
+    match = re.search(pattern, cleaned_text)
     if not match:
         return None
     candidate = match.group(0)
     last_dot = candidate.rfind('.')
     if last_dot == -1:
         return candidate
+
     tld_contig = ""
     for ch in candidate[last_dot+1:]:
         if ch.isalpha():
             tld_contig += ch
         else:
             break
-    max_len = min(9, len(tld_contig) + 1)
+
+    max_length = min(9, len(tld_contig)+1)
     valid_tld = None
-    for i in range(max_len - 1, 1, -1):
-        possible = tld_contig[:i].lower()
-        if possible in COMMON_TLDS:
-            valid_tld = possible
+    for i in range(max_length-1, 1, -1):
+        possible_tld = tld_contig[:i].lower()
+        if possible_tld in COMMON_TLDS:
+            valid_tld = possible_tld
             break
+
     if valid_tld:
-        return candidate[: last_dot + 1 + len(valid_tld)]
-    return candidate
+        final_email = candidate[:last_dot+1+len(valid_tld)]
+        return final_email
+    else:
+        return candidate
 
 def sanitize_filename(filename: str) -> str:
-    fname = filename.replace(" ", "_")
-    return re.sub(r"[^a-zA-Z0-9_.-]", "", fname)
+    filename = filename.replace(" ", "_")
+    filename = re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
+    return filename
 
-@router.post(
-    "/process",
-    summary="Procesar CV (PDF/DOCX) y recalcular matchings si el usuario existe",
-)
-async def process_cv(
+@router.post("/upload")
+async def upload_cv(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user),
+    email: str = Form(None)
 ):
-    """
-    1) Extrae texto de PDF o DOCX.
-    2) Obtiene el email del CV o del usuario autenticado si no está en el archivo.
-    3) Almacena el archivo en GCS bajo 'user_cvs/{user_id}/{uuid}_{nombre}'.
-    4) Actualiza el registro del usuario con la URL del CV.
-    5) Recalcula matchings llamando a run_matching_for_user(user_id).
-    """
     try:
-        # 1) Leer bytes y determinar tipo
+        # 1) Leer bytes del CV
         file_bytes = await file.read()
-        content_type = file.content_type
-        if content_type == "application/pdf":
-            text = extract_text_from_pdf(file_bytes)
-        elif content_type in (
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "application/msword",
-        ):
-            # mismo proceso, usando PdfReader al pasar a texto
-            from docx import Document
-            document = Document(io.BytesIO(file_bytes))
-            text = "\n".join([para.text for para in document.paragraphs])
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="Tipo de archivo no soportado. Solo PDF o DOCX.",
-            )
-        if not text:
-            raise HTTPException(status_code=400, detail="No se extrajo texto del CV.")
+        print(f"✅ Archivo recibido: {file.filename}, tamaño: {len(file_bytes)} bytes")
 
-        # 2) Determinar email: preferimos el del usuario autenticado
-        user_email = current_user.get("email")
-        if not user_email:
-            # Si por algún motivo no viene en token (raro), buscamos en texto
-            extracted = extract_email(text)
-            if not extracted:
-                raise HTTPException(
-                    status_code=400, detail="No se encontró email en el CV ni en el token."
-                )
-            user_email = extracted.lower()
-
-        user_id = current_user.get("id")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Usuario no autenticado correctamente.")
-
-        # 3) Subir el archivo a GCS en carpeta del usuario
-        safe_name = sanitize_filename(file.filename)
-        unique_prefix = str(uuid.uuid4())
-        blob_path = f"user_cvs/{user_id}/{unique_prefix}_{safe_name}"
+        # 2) Normalizar nombre y subir a GCS
+        safe_filename = sanitize_filename(file.filename)
         bucket = storage_client.bucket(BUCKET_NAME)
-        blob = bucket.blob(blob_path)
-        blob.upload_from_string(file_bytes, content_type=content_type)
-        cv_url = blob.public_url
+        blob = bucket.blob(f"pending_cv_uploads/{safe_filename}")
+        blob.upload_from_string(file_bytes, content_type=file.content_type)
+        print(f"✅ Archivo subido a GCS: {blob.public_url}")
 
-        # 4) Actualizar la columna cvUrl del usuario en BD
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            'UPDATE "User" SET "cvUrl" = %s WHERE id = %s RETURNING id;',
-            (cv_url, user_id),
-        )
-        updated = cur.fetchone()
-        if not updated:
-            raise HTTPException(status_code=404, detail="Usuario no encontrado en BD.")
-        conn.commit()
-        cur.close()
-        conn.close()
+        # 3) Extraer texto y email
+        text_content = extract_text_from_pdf(file_bytes)
+        if not text_content:
+            raise HTTPException(status_code=400, detail="No se pudo extraer texto del CV")
+        extracted_email = extract_email(text_content)
+        user_email = (email or extracted_email)
+        if not user_email:
+            raise HTTPException(status_code=400, detail="No se encontró un email válido en el CV")
+        user_email = user_email.lower()
+        print(f"✅ Email extraído: {user_email}")
 
-        # 5) Recalcular matchings para este usuario
-        background_tasks.add_task(run_matching_for_user, user_id)
+        # 4) Generar código de confirmación y guardar en pending_users
+        confirmation_code = str(uuid.uuid4())
+        print(f"✅ Código de confirmación generado: {confirmation_code}")
 
-        return {"message": "CV procesado y matchings en cola de recálculo.", "cvUrl": cv_url}
+        user_id = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO pending_users (id, email, confirmation_code, cv_url)
+                VALUES (gen_random_uuid(), %s, %s, %s)
+                ON CONFLICT (email)
+                DO UPDATE SET confirmation_code = EXCLUDED.confirmation_code, cv_url = EXCLUDED.cv_url
+                RETURNING id
+                """,
+                (user_email, confirmation_code, blob.public_url)
+            )
+            result = cur.fetchone()
+            if result:
+                user_id = result[0]
+            conn.commit()
+            cur.close()
+            conn.close()
+            print("✅ Registro pendiente insertado/actualizado en la base de datos")
+        except Exception as db_err:
+            print(f"❌ Error insertando en la base de datos: {db_err}")
+            raise HTTPException(status_code=500, detail=f"Error base de datos: {db_err}")
+
+        # 5) Enviar email de confirmación en segundo plano
+        background_tasks.add_task(send_confirmation_email, user_email, confirmation_code)
+
+        # 6) Si user_id se obtuvo (nueva fila o actualizada), disparar matching
+        if user_id:
+            background_tasks.add_task(run_matching_for_user, user_id)
+
+        return {
+            "message": f"Se ha enviado un email de confirmación a {user_email}. "
+                       f"Revisa tu bandeja de correo no deseado o spam.",
+            "email": user_email
+        }
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error procesando CV: {e}")
+        print(f"❌ Error procesando el CV: {e}")
+        raise HTTPException(status_code=500, detail=f"Error procesando el CV: {e}")

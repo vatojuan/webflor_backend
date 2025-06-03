@@ -1,3 +1,4 @@
+# app/routers/file_processing.py
 from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, BackgroundTasks
 from sentence_transformers import SentenceTransformer
 import PyPDF2
@@ -7,7 +8,7 @@ from dotenv import load_dotenv
 import os
 from datetime import datetime
 
-from app.routers.match import run_matching_for_user  # Import para recalcular matchings
+from app.routers.match import run_matching_for_user  # <-- Importación añadida
 
 load_dotenv()
 
@@ -19,7 +20,6 @@ router = APIRouter(
 # Cargar el modelo de embeddings (ajusta el nombre del modelo si es necesario)
 model = SentenceTransformer('all-MiniLM-L6-v2')  # Modelo de 384 dimensiones
 
-# Función para extraer texto de un PDF
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     try:
         reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
@@ -30,7 +30,6 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error extrayendo el texto: {e}")
 
-# Función para obtener la conexión a la base de datos (usando el pooler de Supabase)
 def get_db_connection():
     try:
         conn = psycopg2.connect(
@@ -38,12 +37,12 @@ def get_db_connection():
             user=os.getenv("USER", "postgres.apnfioxjddccokgkljvd"),
             password=os.getenv("PASSWORD", "Pachamama190"),
             host=os.getenv("HOST", "aws-0-sa-east-1.pooler.supabase.com"),
-            port=5432,  # Fijo en 5432
+            port=5432,
             sslmode="require"
         )
         return conn
     except Exception as e:
-        raise Exception(f"Error en la conexión a la base de datos: {e}")
+        raise HTTPException(status_code=500, detail=f"Error conexión BD: {e}")
 
 @router.post("/upload")
 async def upload_file(
@@ -52,12 +51,11 @@ async def upload_file(
     file: UploadFile = File(...)
 ):
     """
-    1) Verifica que el archivo sea PDF.
-    2) Extrae texto y genera embedding.
-    3) Almacena embedding en BD.
-    4) Encola recálculo de matchings para ese usuario.
+    1) Verifica PDF, extrae texto.
+    2) Genera embedding y lo guarda en tabla embeddings.
+    3) Dispara run_matching_for_user(user_id) en segundo plano.
     """
-    # 1) Verifica tipo PDF
+    # 1) Validar que sea PDF
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
     
@@ -68,12 +66,9 @@ async def upload_file(
         raise HTTPException(status_code=400, detail="No se pudo extraer texto del archivo")
     
     # 3) Generar embedding
-    try:
-        embedding = model.encode(text).tolist()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generando embedding: {e}")
+    embedding = model.encode(text).tolist()
     
-    # 4) Almacenar en BD
+    # 4) Guardar embedding en BD
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -82,12 +77,7 @@ async def upload_file(
             VALUES (%s, %s, %s, %s)
             RETURNING id;
         """
-        cur.execute(insert_query, (
-            user_id,
-            file.filename,
-            embedding,
-            datetime.utcnow()
-        ))
+        cur.execute(insert_query, (user_id, file.filename, embedding, datetime.utcnow()))
         inserted_id = cur.fetchone()[0]
         conn.commit()
         cur.close()
@@ -95,10 +85,7 @@ async def upload_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error almacenando el embedding: {e}")
     
-    # 5) Recalcular matchings en segundo plano
+    # 5) Disparar matching en segundo plano
     background_tasks.add_task(run_matching_for_user, user_id)
     
-    return {
-        "message": "Archivo procesado, embedding almacenado y recálculo de matchings en cola.",
-        "embedding_id": inserted_id
-    }
+    return {"message": "Archivo procesado y embedding almacenado", "embedding_id": inserted_id}
