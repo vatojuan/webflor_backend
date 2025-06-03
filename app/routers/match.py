@@ -4,17 +4,20 @@ Matchings (Job ↔ User)
 
 • GET  /api/match/job/{job_id}/match      → preview (no escribe BD)
 • GET  /api/match/user/{user_id}/match    → preview inverso
-• GET  /api/match/admin                   → panel admin (solo score >= 0.85)
+• GET  /api/match/admin                   → panel admin (solo score ≥ 0.85)
 • POST /api/match/resend/{mid}            → reenviar mail/WhatsApp
 
 La rutina `run_matching_for_job(job_id)` se invoca al crear o actualizar una oferta.
 Calcula los scores (pgvector) y guarda en `matches`. Después, envía automáticamente
-e-mails a los candidatos cuyo score >= 0.85 usando la plantilla de tipo "empleado".
-Los que queden con score < 0.85 permanecen en status='pending' sin envío.
+e-mails a los candidatos cuyo score ≥ 0.85 usando la plantilla de tipo "empleado".
+También genera un `apply_token` único para cada uno y lo guarda en la tabla, de modo
+que el candidato se postule con un clic sin login. Los que queden con score < 0.85
+permanecen en status='pending' sin envío.
 """
 from __future__ import annotations
 
 import os
+import secrets
 import logging
 import traceback
 from typing import Any, Dict, List, Tuple
@@ -30,6 +33,7 @@ from app.routers.proposal import send_mail, send_whatsapp
 # ─────────────────── Config & auth ───────────────────
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://fapmendoza.online")
 
 oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
@@ -93,10 +97,13 @@ def run_matching_for_job(job_id: int) -> None:
     """
     Recalcula todos los matchings Job→User:
       1) Borra matchings previos de esta oferta.
-      2) Inserta nuevos con status='pending'.
-      3) Selecciona aquellos con score >= 0.85 y les envía e-mail usando plantilla 'empleado',
-         marcándolos luego como status='sent', con sent_at=NOW().
-      4) Deja el resto con status='pending' sin envío.
+      2) Inserta nuevos con status='pending' y SIN token.
+      3) Para cada matching con score ≥ 0.85:
+         • genera un apply_token único y lo guarda en la fila,
+         • envía el e-mail automático usando plantilla 'empleado',
+           dentro del body se inyecta {{apply_link}} = FRONTEND_URL + "/apply/{token}",
+         • marca ese matching con status='sent' y sent_at=NOW().
+      4) Deja el resto con status='pending' sin envío ni token.
     """
     conn = cur = None
     try:
@@ -117,7 +124,7 @@ def run_matching_for_job(job_id: int) -> None:
         # 2) Borrar matchings previos
         cur.execute("DELETE FROM matches WHERE job_id = %s", (job_id,))
 
-        # 3) Insertar todos los nuevos matchings con status='pending'
+        # 3) Insertar todos los nuevos matchings con status='pending' y SIN token
         cur.execute(
             """
             INSERT INTO matches (job_id, user_id, score, status)
@@ -137,11 +144,12 @@ def run_matching_for_job(job_id: int) -> None:
             cur.rowcount, job_id
         )
 
-        # 4) Para cada matching con score >= 0.85, enviar e-mail y marcar como 'sent'
+        # 4) Para cada matching con score >= 0.85, generar token, enviar e-mail y marcar 'sent'
         cur.execute(
             """
-            SELECT m.id, m.user_id, m.score,
-                   u.name, u.email, u."cvUrl", j.title, j.id AS job_id
+            SELECT m.id, m.score,
+                   u.id AS user_id, u.name, u.email, u."cvUrl",
+                   j.title, j.id AS job_id
               FROM matches m
               JOIN "User" u ON u.id = m.user_id
               JOIN "Job" j ON j.id = m.job_id
@@ -151,15 +159,23 @@ def run_matching_for_job(job_id: int) -> None:
         )
         high_matches = cur.fetchall()
 
-        # Obtener plantilla predeterminada tipo "empleado"
         tpl_emp = _get_default_tpl(cur, "empleado")
 
-        for m_id, user_id, score, cand_name, cand_email, cv_url, job_title, job_id_fk in high_matches:
+        for m_id, score, user_id, cand_name, cand_email, cv_url, job_title, job_id_fk in high_matches:
             if not cand_email:
                 continue  # si no hay e-mail de candidato, omitimos
 
-            # Construir contexto con placeholders
-            apply_link = f"{os.getenv('FRONTEND_URL')}/jobs/{job_id_fk}"
+            # Generar token único (32 bytes URL-safe)
+            token = secrets.token_urlsafe(32)
+            apply_link = f"{FRONTEND_URL}/apply/{token}"
+
+            # Guardar el token en la fila de matches
+            cur.execute(
+                "UPDATE matches SET apply_token = %s WHERE id = %s",
+                (token, m_id)
+            )
+
+            # Construir contexto para plantilla “empleado”
             ctx = {
                 "applicant_name": cand_name,
                 "job_title": job_title,
@@ -172,9 +188,14 @@ def run_matching_for_job(job_id: int) -> None:
 
             try:
                 send_mail(cand_email, msg["subject"], msg["body"], cv_url)
-                send_whatsapp(None, msg["body"])  # sin WhatsApp por defecto para candidato
+                # no enviamos WhatsApp al candidato; se omite
                 cur.execute(
-                    "UPDATE matches SET status = 'sent', sent_at = NOW() WHERE id = %s",
+                    """
+                    UPDATE matches
+                       SET status = 'sent',
+                           sent_at = NOW()
+                     WHERE id = %s
+                    """,
                     (m_id,),
                 )
             except Exception as e:
@@ -197,11 +218,11 @@ def run_matching_for_job(job_id: int) -> None:
 @router.get(
     "/admin",
     dependencies=[Depends(get_current_admin)],
-    summary="Listado de matchings guardados (solo score >= 0.85)",
+    summary="Listado de matchings guardados (solo score ≥ 0.85)",
 )
 def list_matchings():
     """
-    Devuelve todos los matchings con score >= 0.85 para el panel admin,
+    Devuelve todos los matchings con score ≥ 0.85 para el panel admin,
     incluyendo datos de job y user para mostrar en frontend.
     """
     conn = cur = None
@@ -240,23 +261,24 @@ def list_matchings():
 )
 def resend_matching(mid: int):
     """
-    Vuelve a enviar el matching identificado por `mid` al candidato correspondiente,
-    usando la plantilla 'empleado' y actualizando sent_at y status.
+    Vuelve a enviar el matching identificado por `mid` al email del candidato
+    (no al empleador). Usa plantilla “empleado” y actualiza sent_at y status.
     """
     conn = cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Obtener datos del matching + candidato + oferta
+        # Obtener datos del matching + job + candidato, incluyendo apply_token
         cur.execute(
             """
             SELECT m.score,
-                   j.id        AS job_id,
+                   m.apply_token,
+                   u.name AS cand_name,
+                   u.email AS cand_email,
+                   u."cvUrl"   AS cand_cv,
                    j.title     AS job_title,
-                   u.name      AS cand_name,
-                   u.email     AS cand_email,
-                   u."cvUrl"   AS cand_cv
+                   j.id        AS job_id
               FROM matches m
               JOIN "Job" j ON j.id = m.job_id
               JOIN "User" u ON u.id = m.user_id
@@ -268,13 +290,13 @@ def resend_matching(mid: int):
         if not row:
             raise HTTPException(404, "Matching no encontrado")
 
-        score, job_id_fk, job_title, cand_name, cand_email, cand_cv = row
+        score, apply_token, cand_name, cand_email, cand_cv, job_title, job_id_fk = row
         if not cand_email:
-            raise HTTPException(400, "Candidato sin e-mail registrado")
+            raise HTTPException(400, "El candidato no tiene email")
 
-        # Obtener plantilla predeterminada tipo "empleado"
+        # Obtener plantilla “empleado”
         tpl_emp = _get_default_tpl(cur, "empleado")
-        apply_link = f"{os.getenv('FRONTEND_URL')}/jobs/{job_id_fk}"
+        apply_link = f"{FRONTEND_URL}/apply/{apply_token or ''}"
         ctx = {
             "applicant_name": cand_name,
             "job_title": job_title,
@@ -286,8 +308,7 @@ def resend_matching(mid: int):
         msg = _apply_tpl(tpl_emp, ctx)
 
         send_mail(cand_email, msg["subject"], msg["body"], cand_cv)
-        send_whatsapp(None, msg["body"])
-
+        # no enviamos WhatsApp al candidato
         cur.execute(
             "UPDATE matches SET sent_at = NOW(), status = 'resent' WHERE id = %s",
             (mid,),
