@@ -4,14 +4,14 @@ Matchings (Job ↔ User)
 
 • GET  /api/match/job/{job_id}/match      → preview (no escribe BD)
 • GET  /api/match/user/{user_id}/match    → preview inverso
-• GET  /api/match/admin                   → panel admin (solo score ≥ 0.85)
+• GET  /api/match/admin                   → panel admin (solo score ≥ 0.80)
 • POST /api/match/resend/{mid}            → reenviar mail/WhatsApp
 
 La rutina `run_matching_for_job(job_id)` se invoca al crear o actualizar una oferta.
 Calcula los scores (pgvector) y guarda en `matches`. Después, envía automáticamente
-e-mails a los candidatos cuyo score ≥ 0.85 usando la plantilla de tipo "empleado".
+e-mails a los candidatos cuyo score ≥ 0.80 usando la plantilla de tipo "empleado".
 También genera un `apply_token` único para cada uno y lo guarda en la tabla, de modo
-que el candidato se postule con un clic sin login. Los que queden con score < 0.85
+que el candidato se postule con un clic sin login. Los que queden con score < 0.80
 permanecen en status='pending' sin envío.
 """
 from __future__ import annotations
@@ -98,7 +98,7 @@ def run_matching_for_job(job_id: int) -> None:
     Recalcula todos los matchings Job→User:
       1) Borra matchings previos de esta oferta.
       2) Inserta nuevos con status='pending' y SIN token.
-      3) Para cada matching con score ≥ 0.85:
+      3) Para cada matching con score ≥ 0.80:
          • genera un apply_token único y lo guarda en la fila,
          • envía el e-mail automático usando plantilla 'empleado',
            dentro del body se inyecta {{apply_link}} = FRONTEND_URL + "/apply/{token}",
@@ -144,7 +144,7 @@ def run_matching_for_job(job_id: int) -> None:
             cur.rowcount, job_id
         )
 
-        # 4) Para cada matching con score >= 0.85, generar token, enviar e-mail y marcar 'sent'
+        # 4) Para cada matching con score >= 0.80, generar token, enviar e-mail y marcar 'sent'
         cur.execute(
             """
             SELECT m.id, m.score,
@@ -155,7 +155,7 @@ def run_matching_for_job(job_id: int) -> None:
               JOIN "Job" j ON j.id = m.job_id
              WHERE m.job_id = %s AND m.score >= %s
             """,
-            (job_id, 0.85),
+            (job_id, 0.80),
         )
         high_matches = cur.fetchall()
 
@@ -218,11 +218,11 @@ def run_matching_for_job(job_id: int) -> None:
 @router.get(
     "/admin",
     dependencies=[Depends(get_current_admin)],
-    summary="Listado de matchings guardados (solo score ≥ 0.85)",
+    summary="Listado de matchings guardados (solo score ≥ 0.80)",
 )
 def list_matchings():
     """
-    Devuelve todos los matchings con score ≥ 0.85 para el panel admin,
+    Devuelve todos los matchings con score ≥ 0.80 para el panel admin,
     incluyendo datos de job y user para mostrar en frontend.
     """
     conn = cur = None
@@ -243,7 +243,7 @@ def list_matchings():
              WHERE m.score >= %s
              ORDER BY m.sent_at DESC NULLS FIRST, m.id DESC
             """,
-            (0.85,),
+            (0.80,),
         )
         return _cur_to_dicts(cur)
     finally:
