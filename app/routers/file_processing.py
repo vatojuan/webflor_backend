@@ -1,5 +1,4 @@
-# app/routers/file_processing.py
-from fastapi import APIRouter, File, UploadFile, HTTPException, Depends
+from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, BackgroundTasks
 from sentence_transformers import SentenceTransformer
 import PyPDF2
 import io
@@ -7,6 +6,8 @@ import psycopg2
 from dotenv import load_dotenv
 import os
 from datetime import datetime
+
+from app.routers.match import run_matching_for_user  # Import para recalcular matchings
 
 load_dotenv()
 
@@ -45,23 +46,34 @@ def get_db_connection():
         raise Exception(f"Error en la conexión a la base de datos: {e}")
 
 @router.post("/upload")
-async def upload_file(user_id: int, file: UploadFile = File(...)):
-    # Verifica que el archivo sea PDF (puedes ampliar a otros tipos)
+async def upload_file(
+    background_tasks: BackgroundTasks,
+    user_id: int,
+    file: UploadFile = File(...)
+):
+    """
+    1) Verifica que el archivo sea PDF.
+    2) Extrae texto y genera embedding.
+    3) Almacena embedding en BD.
+    4) Encola recálculo de matchings para ese usuario.
+    """
+    # 1) Verifica tipo PDF
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
     
-    # Lee el archivo
+    # 2) Leer bytes y extraer texto
     file_bytes = await file.read()
-    
-    # Extrae el texto del PDF
     text = extract_text_from_pdf(file_bytes)
     if not text:
         raise HTTPException(status_code=400, detail="No se pudo extraer texto del archivo")
     
-    # Genera el embedding a partir del texto
-    embedding = model.encode(text).tolist()  # Convertir a lista para almacenarla (puedes guardar como JSON)
+    # 3) Generar embedding
+    try:
+        embedding = model.encode(text).tolist()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generando embedding: {e}")
     
-    # Almacenar en la base de datos (ejemplo usando una tabla "embeddings")
+    # 4) Almacenar en BD
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -70,7 +82,12 @@ async def upload_file(user_id: int, file: UploadFile = File(...)):
             VALUES (%s, %s, %s, %s)
             RETURNING id;
         """
-        cur.execute(insert_query, (user_id, file.filename, embedding, datetime.utcnow()))
+        cur.execute(insert_query, (
+            user_id,
+            file.filename,
+            embedding,
+            datetime.utcnow()
+        ))
         inserted_id = cur.fetchone()[0]
         conn.commit()
         cur.close()
@@ -78,4 +95,10 @@ async def upload_file(user_id: int, file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error almacenando el embedding: {e}")
     
-    return {"message": "Archivo procesado y embedding almacenado", "embedding_id": inserted_id}
+    # 5) Recalcular matchings en segundo plano
+    background_tasks.add_task(run_matching_for_user, user_id)
+    
+    return {
+        "message": "Archivo procesado, embedding almacenado y recálculo de matchings en cola.",
+        "embedding_id": inserted_id
+    }

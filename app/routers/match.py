@@ -12,7 +12,11 @@ Calcula los scores (pgvector) y guarda en `matches`. Después, envía automátic
 e-mails a los candidatos cuyo score ≥ 0.80 usando la plantilla de tipo "empleado".
 También genera un `apply_token` único para cada uno y lo guarda en la tabla, de modo
 que el candidato se postule con un clic sin login. Los que queden con score < 0.80
-permanecen en status='pending' sin envío.
+permanecen en status='pending' sin envío ni token.
+
+La nueva función `run_matching_for_user(user_id)` elimina todos los matchings actuales
+para ese usuario, calcula su score frente a todas las ofertas con embedding y guarda
+esos resultados en `matches` con status='pending'. 
 """
 from __future__ import annotations
 
@@ -31,8 +35,8 @@ from app.database import get_db_connection
 from app.routers.proposal import send_mail, send_whatsapp
 
 # ─────────────────── Config & auth ───────────────────
-SECRET_KEY = os.getenv("SECRET_KEY", "")
-ALGORITHM = os.getenv("ALGORITHM", "HS256")
+SECRET_KEY  = os.getenv("SECRET_KEY", "")
+ALGORITHM   = os.getenv("ALGORITHM", "HS256")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://fapmendoza.online")
 
 oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
@@ -101,7 +105,7 @@ def run_matching_for_job(job_id: int) -> None:
       3) Para cada matching con score ≥ 0.80:
          • genera un apply_token único y lo guarda en la fila,
          • envía el e-mail automático usando plantilla 'empleado',
-           dentro del body se inyecta {{apply_link}} = FRONTEND_URL + "/apply/{token}",
+           inyectando {{apply_link}} = FRONTEND_URL + "/apply/{token}",
          • marca ese matching con status='sent' y sent_at=NOW().
       4) Deja el resto con status='pending' sin envío ni token.
     """
@@ -144,7 +148,7 @@ def run_matching_for_job(job_id: int) -> None:
             cur.rowcount, job_id
         )
 
-        # 4) Para cada matching con score >= 0.80, generar token, enviar e-mail y marcar 'sent'
+        # 4) Para cada matching con score ≥ 0.80, generar token, enviar e-mail y marcar 'sent'
         cur.execute(
             """
             SELECT m.id, m.score,
@@ -207,6 +211,65 @@ def run_matching_for_job(job_id: int) -> None:
         if conn:
             conn.rollback()
         logger.exception("run_matching_for_job error job_id=%d", job_id)
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+# ═══════════ Matching batch (usuario nuevo o CV actualizado) ═══════════
+def run_matching_for_user(user_id: int) -> None:
+    """
+    Recalcula todos los matchings User→Job:
+      1) Borra matchings previos de este usuario.
+      2) Inserta nuevos con status='pending' y SIN token.
+      3) No envía correos aquí; el envío de email lo hace run_matching_for_job
+         cuando se crea o actualiza la oferta.
+    """
+    conn = cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # 1) Borrar matchings previos para este usuario
+        cur.execute("DELETE FROM matches WHERE user_id = %s", (user_id,))
+
+        # 2) Obtener embedding del usuario
+        cur.execute(
+            'SELECT embedding FROM "User" WHERE id = %s AND embedding IS NOT NULL',
+            (user_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            logger.info("run_matching_for_user: usuario %d sin embedding, omito.", user_id)
+            return
+        user_emb = row[0]
+
+        # 3) Insertar nuevos matchings con todas las ofertas que tengan embedding
+        cur.execute(
+            """
+            INSERT INTO matches (job_id, user_id, score, status)
+            SELECT
+              j.id AS job_id,
+              %s  AS user_id,
+              (1.0 - (j.embedding::vector <=> %s::vector)) AS score,
+              'pending' AS status
+            FROM "Job" j
+            WHERE j.embedding IS NOT NULL
+            """,
+            (user_id, user_emb),
+        )
+        conn.commit()
+        logger.info(
+            "run_matching_for_user: %d filas insertadas para usuario %d",
+            cur.rowcount, user_id
+        )
+
+    except Exception:
+        if conn:
+            conn.rollback()
+        logger.exception("run_matching_for_user error user_id=%d", user_id)
     finally:
         if cur:
             cur.close()
