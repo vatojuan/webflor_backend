@@ -1,17 +1,15 @@
 # app/routers/apply.py
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
 from app.database import get_db_connection
+from app.routers.auth import create_access_token  # o la función equivalente
+import os
 
 router = APIRouter(tags=["apply"])
 
-
-@router.get("/apply/{token}", response_class=JSONResponse, summary="Confirmar postulacion")
+@router.get("/apply/{token}", summary="Confirmar postulacion")
 def apply_with_token(token: str):
     """
-    Valida el token, crea la propuesta automática y responde JSON.
-    La página React en /apply/[token].js hará el fetch a este endpoint
-    y mostrará el mensaje de confirmación o error en pantalla.
+    Valida el token, crea la propuesta automática y responde JSON con un JWT del usuario.
     """
     conn = cur = None
     try:
@@ -67,7 +65,9 @@ def apply_with_token(token: str):
         )
         conn.commit()
 
-        return {"success": True, "message": "Postulación confirmada"}
+        # 4) Generar un JWT para el usuario y devolverlo
+        access_token = create_access_token({"sub": str(user_id)})
+        return {"success": True, "token": access_token}
 
     except HTTPException:
         raise
