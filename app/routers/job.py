@@ -1,4 +1,5 @@
 # app/routers/job.py
+
 """
 Ofertas de empleo
 ────────────────────────────────────────────────────────────
@@ -7,6 +8,7 @@ Ofertas de empleo
 • GET  /api/job/my-applications – postulaciones del usuario
 • POST /api/job/create          – alta de oferta por EMPLEADOR
 • POST /api/job/create-admin    – alta de oferta por ADMIN
+• GET  /api/job/apply/{token}   – confirma enlace y crea postulación
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 import requests
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Path, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from psycopg2.extensions import connection  # tipado
@@ -247,6 +249,59 @@ async def my_applications(current_user=Depends(get_current_user)):
     finally:
         if cur: cur.close()
         if conn: conn.close()
+
+
+# ═════════════ CONFIRMACIÓN POR ENLACE (APPLY) ═════════════
+@router.get("/apply/{token}", summary="Confirma y crea postulación vía enlace")
+async def confirm_apply(token: str = Path(..., description="Token enviado por email")):
+    conn = cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # 1) Validar el token: debe existir, no usado y no expirado
+        cur.execute("""
+            SELECT job_id, applicant_id
+              FROM apply_tokens
+             WHERE token      = %s
+               AND used       = FALSE
+               AND expires_at > NOW()
+        """, (token,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail="Token inválido o expirado")
+
+        job_id, applicant_id = row
+
+        # 2) Insertar la propuesta (si no existe ya)
+        cur.execute("""
+            INSERT INTO proposals (job_id, applicant_id, label, status)
+            VALUES (%s, %s, 'automatic', 'sent')
+            ON CONFLICT (job_id, applicant_id) DO NOTHING
+        """, (job_id, applicant_id))
+
+        # 3) Marcar el token como usado
+        cur.execute("UPDATE apply_tokens SET used = TRUE WHERE token = %s", (token,))
+        conn.commit()
+
+        # 4) Generar JWT de usuario (login implícito)
+        payload = {"sub": str(applicant_id), "role": "empleado"}
+        jwt_user = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+        return {"success": True, "token": jwt_user, "jobId": job_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 # ═════════════ CREACIÓN POR EMPLEADOR ═════════════
