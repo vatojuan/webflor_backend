@@ -9,6 +9,7 @@ Ofertas de empleo
 • POST /api/job/create          – alta de oferta por EMPLEADOR
 • POST /api/job/create-admin    – alta de oferta por ADMIN
 • GET  /api/job/apply/{token}   – confirma enlace y crea postulación
+• DELETE /api/job/cancel-application – cancelar postulación
 """
 
 from __future__ import annotations
@@ -22,32 +23,34 @@ import requests
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Request, Path, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+from jose import jwt
 from psycopg2.extensions import connection  # tipado
 
-from app.database      import get_db_connection
-from app.routers.match import run_matching_for_job   # ⚠️ debe existir
+from app.database import get_db_connection
+from app.routers.match import run_matching_for_job  # ⚠️ debe existir
 
 # ───────────────────────────────────────────────────────
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM  = os.getenv("ALGORITHM", "HS256")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
 
 oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
-oauth2_user  = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2_user = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 router = APIRouter(prefix="/api/job", tags=["job"])
 
 
 # ─────────────────── Auth helpers ────────────────────
-def _decode(token: str) -> Dict[str,Any]:
+def _decode(token: str) -> Dict[str, Any]:
     return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+
 
 def get_current_admin_sub(tok: str = Depends(oauth2_admin)) -> str:
     try:
         return _decode(tok)["sub"]
     except Exception:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token admin inválido")
+
 
 def get_current_user(tok: str = Depends(oauth2_user)):
     try:
@@ -59,18 +62,25 @@ def get_current_user(tok: str = Depends(oauth2_user)):
 
 # ─────────────────── DB helpers ──────────────────────
 def get_admin_id_by_email(mail: str) -> Optional[int]:
-    conn = get_db_connection(); cur = conn.cursor()
+    conn = get_db_connection()
+    cur = conn.cursor()
     try:
         cur.execute('SELECT id FROM "User" WHERE email=%s LIMIT 1;', (mail,))
-        row = cur.fetchone(); return row[0] if row else None
+        row = cur.fetchone()
+        return row[0] if row else None
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
+
 
 def job_has_column(cur, col: str) -> bool:
-    cur.execute("""
+    cur.execute(
+        """
         SELECT 1 FROM information_schema.columns
          WHERE table_name='Job' AND column_name=%s LIMIT 1
-    """, (col,))
+        """,
+        (col,),
+    )
     return bool(cur.fetchone())
 
 
@@ -94,47 +104,50 @@ def generate_embedding(txt: str) -> Optional[List[float]]:
 
 # ═══════════ Helpers comunes (inserción + matching) ═══════════
 def _insert_job(
-    payload: Dict[str,Any],
+    payload: Dict[str, Any],
     owner_id: int,
     source: str,
-    label_default: str = "manual"
-) -> Tuple[int,str]:
+    label_default: str = "manual",
+) -> Tuple[int, str]:
     """
     Inserta una oferta y dispara matching.
     Devuelve (job_id, contact_email) sólo para logging/uso futuro.
     """
-    title  = (payload.get("title")       or "").strip()
-    desc   = (payload.get("description") or "").strip()
-    reqs   = (payload.get("requirements")or "").strip()
+    title = (payload.get("title") or "").strip()
+    desc = (payload.get("description") or "").strip()
+    reqs = (payload.get("requirements") or "").strip()
 
     if not title or not desc:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "title y description son obligatorios"
+            "title y description son obligatorios",
         )
 
     expiration = payload.get("expirationDate")
     try:
-        exp_dt = datetime.fromisoformat(
-            expiration.replace("Z","+00:00")
-        ) if expiration else None
+        exp_dt = (
+            datetime.fromisoformat(expiration.replace("Z", "+00:00"))
+            if expiration
+            else None
+        )
     except ValueError:
         raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "expirationDate inválida"
+            status.HTTP_400_BAD_REQUEST, "expirationDate inválida"
         )
 
-    label         = payload.get("label", label_default)
-    is_paid       = bool(payload.get("isPaid", False))
+    label = payload.get("label", label_default)
+    is_paid = bool(payload.get("isPaid", False))
     contact_email = payload.get("contactEmail") or payload.get("contact_email")
     contact_phone = payload.get("contactPhone") or payload.get("contact_phone")
 
     # Si el empleador no envía contacto, usamos su propio mail/phone
     if not contact_email or not contact_phone:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute('SELECT email, phone FROM "User" WHERE id=%s', (owner_id,))
-        mail_fallback, phone_fallback = cur.fetchone() or ("","")
-        cur.close(); conn.close()
+        mail_fallback, phone_fallback = cur.fetchone() or ("", "")
+        cur.close()
+        conn.close()
         contact_email = contact_email or mail_fallback
         contact_phone = contact_phone or phone_fallback
 
@@ -142,25 +155,34 @@ def _insert_job(
 
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-        has_is_paid       = job_has_column(cur, "is_paid")
+        has_is_paid = job_has_column(cur, "is_paid")
         has_snake_contact = job_has_column(cur, "contact_email")
         has_camel_contact = job_has_column(cur, "contactEmail")
 
         email_col = phone_col = None
-        if   has_snake_contact: email_col, phone_col = "contact_email", "contact_phone"
-        elif has_camel_contact: email_col, phone_col = "contactEmail", "contactPhone"
+        if has_snake_contact:
+            email_col, phone_col = "contact_email", "contact_phone"
+        elif has_camel_contact:
+            email_col, phone_col = "contactEmail", "contactPhone"
 
         fields = [
-            "title","description","requirements",
-            '"expirationDate"','"userId"',"embedding",
-            "label","source"
+            "title",
+            "description",
+            "requirements",
+            '"expirationDate"',
+            '"userId"',
+            "embedding",
+            "label",
+            "source",
         ]
         values = [title, desc, reqs, exp_dt, owner_id, embedding, label, source]
 
         if has_is_paid:
-            fields.append("is_paid"); values.append(is_paid)
+            fields.append("is_paid")
+            values.append(is_paid)
         if email_col:
             fields.extend([email_col, phone_col])
             values.extend([contact_email, contact_phone])
@@ -168,7 +190,7 @@ def _insert_job(
         ph = ", ".join(["%s"] * len(fields))
         cur.execute(
             f'INSERT INTO "Job" ({", ".join(fields)}) VALUES ({ph}) RETURNING id;',
-            tuple(values)
+            tuple(values),
         )
         job_id = cur.fetchone()[0]
         conn.commit()
@@ -177,19 +199,16 @@ def _insert_job(
             conn.rollback()
         traceback.print_exc()
         raise HTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            "Error al crear oferta"
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al crear oferta"
         )
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
     # matching en background
-    threading.Thread(
-        target=run_matching_for_job,
-        args=(job_id,),
-        daemon=True
-    ).start()
+    threading.Thread(target=run_matching_for_job, args=(job_id,), daemon=True).start()
 
     return job_id, contact_email or ""
 
@@ -200,55 +219,65 @@ def _insert_job(
 async def list_jobs(userId: Optional[int] = None):
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
         has_source = job_has_column(cur, "source")
-        has_label  = job_has_column(cur, "label")
+        has_label = job_has_column(cur, "label")
 
-        base = ['id','title','description','requirements',
-                '"expirationDate"','"userId"']
-        sel  = base + [
+        base = ["id", "title", "description", "requirements", '"expirationDate"', '"userId"']
+        sel = base + [
             ("source" if has_source else "NULL AS source"),
-            ("label" if has_label else "NULL AS label")
+            ("label" if has_label else "NULL AS label"),
         ]
 
-        sql    = f'SELECT {",".join(sel)} FROM public."Job" ' \
-                 'WHERE "expirationDate" IS NULL OR "expirationDate" > NOW()'
-        params = ()
+        sql = (
+            f'SELECT {",".join(sel)} FROM public."Job" '
+            'WHERE "expirationDate" IS NULL OR "expirationDate" > NOW()'
+        )
+        params: Tuple = ()
         if userId is not None:
-            sql    += ' AND "userId"=%s'
-            params  = (userId,)
+            sql += ' AND "userId"=%s'
+            params = (userId,)
 
-        sql += ' ORDER BY id DESC'
+        sql += " ORDER BY id DESC"
         cur.execute(sql, params)
 
         cols = [d[0] for d in cur.description]
         return {"offers": [dict(zip(cols, r)) for r in cur.fetchall()]}
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 @router.get("/my-applications", summary="Postulaciones del usuario")
 async def my_applications(current_user=Depends(get_current_user)):
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("""
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
             SELECT
               id,
               job_id          AS "jobId",
               status,
               created_at      AS "createdAt"
             FROM proposals
-            WHERE applicant_id = %s                     -- CORRECCIÓN: usar applicant_id
+            WHERE applicant_id = %s
               AND status NOT IN ('cancelled','rejected')
             ORDER BY created_at DESC
-        """, (current_user.id,))
+            """,
+            (current_user.id,),
+        )
         cols = [d[0] for d in cur.description]
         return {"applications": [dict(zip(cols, r)) for r in cur.fetchall()]}
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 # ═════════════ CONFIRMACIÓN POR ENLACE (APPLY) ═════════════
@@ -260,13 +289,16 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
         cur = conn.cursor()
 
         # 1) Validar el token: debe existir, no usado y no expirado
-        cur.execute("""
+        cur.execute(
+            """
             SELECT job_id, applicant_id
               FROM apply_tokens
              WHERE token      = %s
                AND used       = FALSE
                AND expires_at > NOW()
-        """, (token,))
+            """,
+            (token,),
+        )
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=400, detail="Token inválido o expirado")
@@ -274,11 +306,14 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
         job_id, applicant_id = row
 
         # 2) Insertar la propuesta (si no existe ya)
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO proposals (job_id, applicant_id, label, status)
             VALUES (%s, %s, 'automatic', 'sent')
             ON CONFLICT (job_id, applicant_id) DO NOTHING
-        """, (job_id, applicant_id))
+            """,
+            (job_id, applicant_id),
+        )
 
         # 3) Marcar el token como usado
         cur.execute("UPDATE apply_tokens SET used = TRUE WHERE token = %s", (token,))
@@ -308,23 +343,16 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
 @router.post(
     "/create",
     status_code=status.HTTP_201_CREATED,
-    summary="Crear oferta (empleador)"
+    summary="Crear oferta (empleador)",
 )
-async def create_job(
-    data: Dict[str,Any],
-    current_user = Depends(get_current_user)
-):
+async def create_job(data: Dict[str, Any], current_user=Depends(get_current_user)):
     """
     Crea una oferta en nombre del empleador autenticado (`role` empleado/empleador).
     • source='employer'
     • label  por defecto 'manual'
     Se genera embedding y se dispara matching automático.
     """
-    job_id, _ = _insert_job(
-        data,
-        owner_id=current_user.id,
-        source="employer"
-    )
+    job_id, _ = _insert_job(data, owner_id=current_user.id, source="employer")
     return {"message": "Oferta creada", "jobId": job_id}
 
 
@@ -333,12 +361,9 @@ async def create_job(
     "/create-admin",
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(oauth2_admin)],
-    summary="Crear oferta (admin)"
+    summary="Crear oferta (admin)",
 )
-async def create_admin_job(
-    request: Request,
-    admin_sub: str = Depends(get_current_admin_sub)
-):
+async def create_admin_job(request: Request, admin_sub: str = Depends(get_current_admin_sub)):
     data = await request.json()
 
     # Determinar owner (puede venir userId o lo buscamos por mail admin)
@@ -351,16 +376,62 @@ async def create_admin_job(
     if not owner_id:
         owner_id = get_admin_id_by_email(admin_sub)
         if not owner_id:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                "Admin sin usuario asociado"
-            )
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Admin sin usuario asociado")
 
     # Admin puede indicar libremente source/label/isPaid/contact*
     job_id, _ = _insert_job(
         data,
         owner_id=owner_id,
-        source=data.get("source","admin"),
-        label_default=data.get("label","manual")
+        source=data.get("source", "admin"),
+        label_default=data.get("label", "manual"),
     )
     return {"message": "Oferta creada", "jobId": job_id}
+
+
+# ═════════════ CANCELAR POSTULACIÓN ═════════════
+@router.delete("/cancel-application", summary="Cancelar la postulación del usuario")
+async def cancel_application(payload: Dict[str, Any], current_user=Depends(get_current_user)):
+    """
+    Recibe JSON { jobId: <int> } y marca la propuesta del usuario actual como 'cancelled'.
+    """
+    job_id = payload.get("jobId")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="Falta jobId")
+
+    conn = cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # 1) Verificar que exista una propuesta activa (no cancelada/rechazada) para este usuario y job
+        cur.execute(
+            """
+            SELECT id
+              FROM proposals
+             WHERE job_id = %s
+               AND applicant_id = %s
+               AND status NOT IN ('cancelled','rejected')
+             LIMIT 1
+            """,
+            (job_id, current_user.id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="No existe postulación activa para cancelar")
+        proposal_id = row[0]
+
+        # 2) Marcarla como cancelled
+        cur.execute("UPDATE proposals SET status = 'cancelled' WHERE id = %s", (proposal_id,))
+        conn.commit()
+        return {"message": "Postulación cancelada"}
+    except HTTPException:
+        raise
+    except Exception:
+        if conn:
+            conn.rollback()
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Error interno al cancelar")
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
