@@ -3,18 +3,21 @@
 """
 Ofertas de empleo
 ────────────────────────────────────────────────────────────
-• GET  /api/job/                – ofertas vigentes
-• GET  /api/job/list            – alias legacy
-• GET  /api/job/my-applications – postulaciones del usuario
-• POST /api/job/create          – alta de oferta por EMPLEADOR
-• POST /api/job/create-admin    – alta de oferta por ADMIN
-• GET  /api/job/apply/{token}   – confirma enlace y crea postulación
-• DELETE /api/job/cancel-application – cancelar postulación
+• GET    /api/job/                      – listar ofertas vigentes
+• GET    /api/job/list                  – alias legacy
+• GET    /api/job/my-applications       – postulaciones del usuario
+• POST   /api/job/create                – alta de oferta por EMPLEADOR
+• POST   /api/job/create-admin          – alta de oferta por ADMIN
+• GET    /api/job/apply/{token}         – confirma enlace y crea postulación
+• POST   /api/job/apply                 – postularse a una oferta directamente
+• DELETE /api/job/cancel-application    – cancelar postulación
 """
 
 from __future__ import annotations
 
-import os, threading, traceback
+import os
+import threading
+import traceback
 from datetime import datetime
 from types import SimpleNamespace
 from typing import List, Optional, Tuple, Dict, Any
@@ -332,6 +335,52 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
             conn.rollback()
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+# ═════════════ POSTULAR DIRECTAMENTE (APLICACIÓN MANUAL) ═════════════
+@router.post("/apply", summary="Postularse a una oferta directamente")
+async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current_user)):
+    """
+    Recibe JSON { jobId: <int> } y crea una propuesta manual para el usuario autenticado.
+    """
+    job_id = payload.get("jobId")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="Falta jobId")
+
+    conn = cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # 1) Verificar si ya existe una propuesta activa
+        cur.execute(
+            """
+            SELECT id
+              FROM proposals
+             WHERE job_id = %s
+               AND applicant_id = %s
+             LIMIT 1
+            """,
+            (job_id, current_user.id),
+        )
+        if cur.fetchone():
+            raise HTTPException(status_code=409, detail="Ya estás postulado a esta oferta")
+
+        # 2) Insertar la propuesta
+        cur.execute(
+            """
+            INSERT INTO proposals (job_id, applicant_id, label, status)
+            VALUES (%s, %s, 'manual', 'pending')
+            """,
+            (job_id, current_user.id),
+        )
+        conn.commit()
+        return {"message": "Postulación registrada"}
     finally:
         if cur:
             cur.close()
