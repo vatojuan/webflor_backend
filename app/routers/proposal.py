@@ -2,7 +2,7 @@
 # app/routers/proposal.py
 # ----------------------------------------------------------
 # Envío de propuestas por e-mail / WhatsApp + gestión de estado
-# Versión profesional – 28-may-2025
+# Versión profesional – 28-may-2025 (modificado 05-jun-2025)
 ############################################################
 
 from __future__ import annotations
@@ -139,11 +139,11 @@ def deliver(pid: int, sleep_first: bool) -> None:
         # ── Datos del Job
         cur.execute('SELECT * FROM "Job" WHERE id = %s', (job_id,))
         job = dict(zip([d[0] for d in cur.description], cur.fetchone()))
-        title   = job.get("title")
-        label   = job.get("label") or "manual"
-        c_email = job.get("contact_email")  or job.get("contactEmail")
-        c_phone = job.get("contact_phone")  or job.get("contactPhone")
-        owner_id= job.get("user_id")        or job.get("userId")
+        title    = job.get("title")
+        label    = job.get("label") or "manual"
+        c_email  = job.get("contact_email")  or job.get("contactEmail")
+        c_phone  = job.get("contact_phone")  or job.get("contactPhone")
+        owner_id = job.get("user_id")        or job.get("userId")
 
         # ── Postulante
         cur.execute('SELECT name, email, "cvUrl" FROM "User" WHERE id = %s',
@@ -205,36 +205,66 @@ def deliver(pid: int, sleep_first: bool) -> None:
 # ───────────────────────── End-points ─────────────────────────────
 @router.post("/create")
 def create(data: dict, bg: BackgroundTasks):
-    job_id, applicant_id = data.get("job_id"), data.get("applicant_id")
+    job_id       = data.get("job_id")
+    applicant_id = data.get("applicant_id")
     if not job_id or not applicant_id:
         raise HTTPException(400, "Faltan campos requeridos")
 
     conn = cur = None
     try:
-        conn = db(); cur = conn.cursor()
+        conn = db()
+        cur = conn.cursor()
+
+        # 1) Determinar label del job
         cur.execute('SELECT label FROM "Job" WHERE id = %s', (job_id,))
         label = (cur.fetchone() or ["manual"])[0] or "manual"
 
-        cur.execute("""INSERT INTO proposals
-                       (job_id, applicant_id, label, status, created_at)
-                       SELECT %s, %s, %s, %s, NOW()
-                        WHERE NOT EXISTS (
-                          SELECT 1 FROM proposals
-                           WHERE job_id = %s AND applicant_id = %s)
-                       RETURNING id""",
-                    (job_id, applicant_id, label,
-                     "waiting" if label == "automatic" else "pending",
-                     job_id, applicant_id))
+        # 2) Chequear si ya existe propuesta para este job y postulante
+        cur.execute("""
+            SELECT id, status
+              FROM proposals
+             WHERE job_id = %s AND applicant_id = %s
+        """, (job_id, applicant_id))
+        existing = cur.fetchone()
+
+        if existing:
+            pid_existing, st = existing
+            if st == "cancelled":
+                # Borrar la propuesta cancelada para permitir una nueva
+                cur.execute("DELETE FROM proposals WHERE id = %s", (pid_existing,))
+                conn.commit()
+                logger.info("🗑️  propuesta %d eliminada (cancelada previa)", pid_existing)
+            else:
+                # Si existe y no está cancelada => no permitir duplicado
+                conn.commit()
+                raise HTTPException(400, "Ya has postulado a este empleo")
+
+        # 3) Insertar nueva propuesta
+        cur.execute("""
+            INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
+            VALUES (%s, %s, %s, %s, NOW())
+            RETURNING id
+        """, (
+            job_id,
+            applicant_id,
+            label,
+            "waiting" if label == "automatic" else "pending"
+        ))
         row = cur.fetchone()
         if not row:
+            # En el improbable caso que no retorne id
             conn.commit()
-            return {"message": "Ya existe una propuesta"}
-        pid = row[0]; conn.commit()
+            raise HTTPException(500, "No se pudo crear la propuesta")
+        pid = row[0]
+        conn.commit()
         logger.info("🆕 propuesta %d creada (%s)", pid, label)
 
+        # 4) Si es automática, programar entrega
         if label == "automatic":
             bg.add_task(deliver, pid, True)
+
         return {"proposal_id": pid}
+
     finally:
         if cur: cur.close()
         if conn: conn.close()
@@ -244,7 +274,8 @@ def send_manual(pid: int):
     """Cambia de 'pending' → 'sending' y envía al instante."""
     conn = cur = None
     try:
-        conn = db(); cur = conn.cursor()
+        conn = db()
+        cur = conn.cursor()
         cur.execute("""UPDATE proposals
                          SET status = 'sending'
                        WHERE id = %s AND status = 'pending'
@@ -267,7 +298,8 @@ def cancel(data: dict):
 
     conn = cur = None
     try:
-        conn = db(); cur = conn.cursor()
+        conn = db()
+        cur = conn.cursor()
         cur.execute("SELECT status FROM proposals WHERE id = %s", (pid,))
         st = (cur.fetchone() or [None])[0]
         if st is None:
@@ -289,7 +321,8 @@ def cancel(data: dict):
 def delete_cancelled(pid: int):
     conn = cur = None
     try:
-        conn = db(); cur = conn.cursor()
+        conn = db()
+        cur = conn.cursor()
         cur.execute("SELECT status FROM proposals WHERE id = %s", (pid,))
         st = (cur.fetchone() or [None])[0]
         if st is None:
@@ -308,7 +341,8 @@ def delete_cancelled(pid: int):
 def list_proposals():
     conn = cur = None
     try:
-        conn = db(); cur = conn.cursor()
+        conn = db()
+        cur = conn.cursor()
         cols = job_columns(cur)
         email_c = "contact_email" if "contact_email" in cols \
                   else "\"contactEmail\"" if "contactEmail" in cols else None
