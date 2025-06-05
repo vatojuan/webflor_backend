@@ -45,22 +45,23 @@ router = APIRouter(prefix="/api/job", tags=["job"])
 
 # ─────────────────── Auth helpers ────────────────────
 def _decode(token: str) -> Dict[str, Any]:
-    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except Exception:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido")
 
 
 def get_current_admin_sub(tok: str = Depends(oauth2_admin)) -> str:
-    try:
-        return _decode(tok)["sub"]
-    except Exception:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token admin inválido")
+    decoded = _decode(tok)
+    return decoded.get("sub", "")
 
 
 def get_current_user(tok: str = Depends(oauth2_user)):
-    try:
-        uid = _decode(tok).get("sub")
-        return SimpleNamespace(id=int(uid))
-    except Exception:
+    decoded = _decode(tok)
+    uid = decoded.get("sub")
+    if not uid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token usuario inválido")
+    return SimpleNamespace(id=int(uid))
 
 
 # ─────────────────── DB helpers ──────────────────────
@@ -263,14 +264,14 @@ async def my_applications(current_user=Depends(get_current_user)):
         cur.execute(
             """
             SELECT
-              id,
-              job_id          AS "jobId",
-              status,
-              created_at      AS "createdAt"
-            FROM proposals
-            WHERE applicant_id = %s
-              AND status NOT IN ('cancelled','rejected')
-            ORDER BY created_at DESC
+              p.id,
+              p.job_id          AS "jobId",
+              p.status,
+              p.created_at      AS "createdAt"
+            FROM proposals p
+            WHERE p.applicant_id = %s
+              AND p.status NOT IN ('cancelled','rejected')
+            ORDER BY p.created_at DESC
             """,
             (current_user.id,),
         )
@@ -347,6 +348,8 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
 async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current_user)):
     """
     Recibe JSON { jobId: <int> } y crea una propuesta manual para el usuario autenticado.
+    Si existe una propuesta con estado 'cancelled', la elimina y crea una nueva.
+    Si existe con estado distinto de 'cancelled', retorna 409.
     """
     job_id = payload.get("jobId")
     if not job_id:
@@ -357,30 +360,44 @@ async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # 1) Verificar si ya existe una propuesta activa
+        # 1) Verificar si ya existe alguna propuesta previa
         cur.execute(
             """
-            SELECT id
+            SELECT id, status
               FROM proposals
              WHERE job_id = %s
                AND applicant_id = %s
+             ORDER BY created_at DESC
              LIMIT 1
             """,
             (job_id, current_user.id),
         )
-        if cur.fetchone():
-            raise HTTPException(status_code=409, detail="Ya estás postulado a esta oferta")
+        row = cur.fetchone()
+        if row:
+            existing_id, existing_status = row
+            if existing_status != "cancelled":
+                # Ya hay una activa (pending, sent, etc.)
+                raise HTTPException(status_code=409, detail="Ya estás postulado a esta oferta")
+            # Si la última está 'cancelled', borramos el registro para crear uno nuevo
+            cur.execute("DELETE FROM proposals WHERE id = %s", (existing_id,))
 
-        # 2) Insertar la propuesta
+        # 2) Insertar la nueva propuesta
         cur.execute(
             """
-            INSERT INTO proposals (job_id, applicant_id, label, status)
-            VALUES (%s, %s, 'manual', 'pending')
+            INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
+            VALUES (%s, %s, 'manual', 'pending', NOW())
             """,
             (job_id, current_user.id),
         )
         conn.commit()
         return {"message": "Postulación registrada"}
+    except HTTPException:
+        raise
+    except Exception:
+        if conn:
+            conn.rollback()
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Error interno al postular")
     finally:
         if cur:
             cur.close()
@@ -469,7 +486,7 @@ async def cancel_application(payload: Dict[str, Any], current_user=Depends(get_c
         proposal_id = row[0]
 
         # 2) Marcarla como cancelled
-        cur.execute("UPDATE proposals SET status = 'cancelled' WHERE id = %s", (proposal_id,))
+        cur.execute("UPDATE proposals SET status = 'cancelled', cancelled_at = NOW() WHERE id = %s", (proposal_id,))
         conn.commit()
         return {"message": "Postulación cancelada"}
     except HTTPException:
