@@ -343,13 +343,17 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
             conn.close()
 
 
-# ═════════════ POSTULAR DIRECTAMENTE (APLICACIÓN MANUAL) ═════════════
+# ═════════════ POSTULAR DIRECTAMENTE (APLICACIÓN MANUAL O AUTOMÁTICA) ═════════════
 @router.post("/apply", summary="Postularse a una oferta directamente")
 async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current_user)):
     """
-    Recibe JSON { jobId: <int> } y crea una propuesta manual para el usuario autenticado.
-    Si existe una propuesta con estado 'cancelled', la elimina y crea una nueva.
-    Si existe con estado distinto de 'cancelled', retorna 409.
+    Recibe JSON { jobId: <int> } y crea una propuesta para el usuario autenticado.
+    Si existe una propuesta previa:
+      • Si su estado es 'cancelled', se elimina y se crea una nueva.
+      • Si su estado es distinto, retorna 409.
+    La nueva propuesta hereda el 'label' de la oferta:
+      • Si la oferta es 'automatic', inserta con label='automatic', status='sent'.
+      • Si la oferta es 'manual', inserta con label='manual',  status='pending'.
     """
     job_id = payload.get("jobId")
     if not job_id:
@@ -360,7 +364,21 @@ async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # 1) Verificar si ya existe alguna propuesta previa
+        # 0) Obtener label de la oferta
+        cur.execute('SELECT label FROM "Job" WHERE id = %s;', (job_id,))
+        job_row = cur.fetchone()
+        if not job_row:
+            raise HTTPException(status_code=404, detail="Oferta no existe")
+        job_label = job_row[0] or "manual"
+        # Determinar label y estado
+        if job_label == "automatic":
+            new_label = "automatic"
+            new_status = "sent"
+        else:
+            new_label = "manual"
+            new_status = "pending"
+
+        # 1) Verificar si ya existe alguna propuesta (activa o cancelada)
         cur.execute(
             """
             SELECT id, status
@@ -381,16 +399,16 @@ async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current
             # Si la última está 'cancelled', borramos el registro para crear uno nuevo
             cur.execute("DELETE FROM proposals WHERE id = %s", (existing_id,))
 
-        # 2) Insertar la nueva propuesta
+        # 2) Insertar la nueva propuesta con el label/estado determinado
         cur.execute(
             """
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-            VALUES (%s, %s, 'manual', 'pending', NOW())
+            VALUES (%s, %s, %s, %s, NOW())
             """,
-            (job_id, current_user.id),
+            (job_id, current_user.id, new_label, new_status),
         )
         conn.commit()
-        return {"message": "Postulación registrada"}
+        return {"message": "Postulación registrada", "label": new_label, "status": new_status}
     except HTTPException:
         raise
     except Exception:
@@ -486,7 +504,10 @@ async def cancel_application(payload: Dict[str, Any], current_user=Depends(get_c
         proposal_id = row[0]
 
         # 2) Marcarla como cancelled
-        cur.execute("UPDATE proposals SET status = 'cancelled', cancelled_at = NOW() WHERE id = %s", (proposal_id,))
+        cur.execute(
+            "UPDATE proposals SET status = 'cancelled', cancelled_at = NOW() WHERE id = %s",
+            (proposal_id,),
+        )
         conn.commit()
         return {"message": "Postulación cancelada"}
     except HTTPException:
