@@ -348,12 +348,10 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
 async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current_user)):
     """
     Recibe JSON { jobId: <int> } y crea una propuesta para el usuario autenticado.
-    Si existe una propuesta previa:
-      • Si su estado es 'cancelled', se elimina y se crea una nueva.
-      • Si su estado es distinto, retorna 409.
-    La nueva propuesta hereda el 'label' de la oferta:
-      • Si la oferta es 'automatic', inserta con label='automatic', status='sent'.
-      • Si la oferta es 'manual', inserta con label='manual',  status='pending'.
+    - Si la oferta tiene label='automatic', inserta con label 'automatic' y status 'sent'.
+    - Si la oferta tiene label distinto (o no existe columna label), inserta con label 'manual' y status 'pending'.
+    Si existe una propuesta previa con status 'cancelled', la elimina antes de crear la nueva.
+    Si existe una propuesta activa (status != 'cancelled'), retorna 409.
     """
     job_id = payload.get("jobId")
     if not job_id:
@@ -364,21 +362,19 @@ async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # 0) Obtener label de la oferta
-        cur.execute('SELECT label FROM "Job" WHERE id = %s;', (job_id,))
-        job_row = cur.fetchone()
-        if not job_row:
-            raise HTTPException(status_code=404, detail="Oferta no existe")
-        job_label = job_row[0] or "manual"
-        # Determinar label y estado
-        if job_label == "automatic":
-            new_label = "automatic"
-            new_status = "sent"
-        else:
-            new_label = "manual"
-            new_status = "pending"
+        # 1) Averiguar label de la oferta
+        cur.execute(
+            """
+            SELECT label
+              FROM "Job"
+             WHERE id = %s
+            """,
+            (job_id,),
+        )
+        row_label = cur.fetchone()
+        job_label = row_label[0] if row_label and row_label[0] else "manual"
 
-        # 1) Verificar si ya existe alguna propuesta (activa o cancelada)
+        # 2) Verificar si ya existe alguna propuesta previa para este usuario y job
         cur.execute(
             """
             SELECT id, status
@@ -394,21 +390,33 @@ async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current
         if row:
             existing_id, existing_status = row
             if existing_status != "cancelled":
-                # Ya hay una activa (pending, sent, etc.)
+                # Ya hay una propuesta activa (pending, sent, etc.)
                 raise HTTPException(status_code=409, detail="Ya estás postulado a esta oferta")
             # Si la última está 'cancelled', borramos el registro para crear uno nuevo
             cur.execute("DELETE FROM proposals WHERE id = %s", (existing_id,))
 
-        # 2) Insertar la nueva propuesta con el label/estado determinado
-        cur.execute(
-            """
-            INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-            VALUES (%s, %s, %s, %s, NOW())
-            """,
-            (job_id, current_user.id, new_label, new_status),
-        )
+        # 3) Insertar la nueva propuesta de acuerdo al label de la oferta
+        if job_label == "automatic":
+            # Propuesta automática: se marca como 'sent' de una
+            cur.execute(
+                """
+                INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
+                VALUES (%s, %s, 'automatic', 'sent', NOW())
+                """,
+                (job_id, current_user.id),
+            )
+        else:
+            # Propuesta manual: se marca como 'pending'
+            cur.execute(
+                """
+                INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
+                VALUES (%s, %s, 'manual', 'pending', NOW())
+                """,
+                (job_id, current_user.id),
+            )
+
         conn.commit()
-        return {"message": "Postulación registrada", "label": new_label, "status": new_status}
+        return {"message": "Postulación registrada"}
     except HTTPException:
         raise
     except Exception:
