@@ -30,8 +30,8 @@ from jose import jwt
 from psycopg2.extensions import connection  # tipado
 
 from app.database import get_db_connection
-from app.routers.match import run_matching_for_job  # ⚠️ debe existir
-from app.routers.proposal import deliver           # importar la función de envío
+from app.routers.match import run_matching_for_job  # debe existir
+from app.routers.proposal import deliver           # función de envío
 
 # ───────────────────────────────────────────────────────
 load_dotenv()
@@ -166,11 +166,9 @@ def _insert_job(
         values = [title, desc, reqs, exp_dt, owner_id, embedding, label, source]
 
         if has_is_paid:
-            fields.append("is_paid")
-            values.append(is_paid)
+            fields.append("is_paid");        values.append(is_paid)
         if email_col:
-            fields.extend([email_col, phone_col])
-            values.extend([contact_email, contact_phone])
+            fields.extend([email_col, phone_col]); values.extend([contact_email, contact_phone])
 
         ph = ", ".join(["%s"] * len(fields))
         cur.execute(
@@ -267,10 +265,12 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
     conn = cur = None
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur  = conn.cursor()
+
+        # 1) Intentar en apply_tokens
         cur.execute(
             """
-            SELECT job_id, applicant_id
+            SELECT job_id, applicant_id, 'apply_tokens' AS origin
               FROM apply_tokens
              WHERE token::text = %s
                AND used       = FALSE
@@ -279,12 +279,28 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
             (token,),
         )
         row = cur.fetchone()
+
+        # 2) Si no existe, buscar en matches.apply_token
+        if not row:
+            cur.execute(
+                """
+                SELECT job_id,
+                       user_id      AS applicant_id,
+                       'matches'    AS origin
+                  FROM matches
+                 WHERE apply_token = %s
+                   AND (apply_token_used IS NULL OR apply_token_used = FALSE)
+                """,
+                (token,),
+            )
+            row = cur.fetchone()
+
         if not row:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Token inválido o expirado")
 
-        job_id, applicant_id = row
+        job_id, applicant_id, origin = row
 
-        # Insertar en waiting y lanzar deliver
+        # 3) Insertar propuesta en waiting + commit
         cur.execute(
             """
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
@@ -294,15 +310,27 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
             (job_id, applicant_id),
         )
         pid = cur.fetchone()[0]
-
-        cur.execute("UPDATE apply_tokens SET used = TRUE WHERE token::text = %s", (token,))
         conn.commit()
 
+        # Lanzar envío en background
         threading.Thread(target=deliver, args=(pid, True), daemon=True).start()
 
-        # login implícito
+        # 4) Marcar token como usado en la tabla correcta
+        if origin == "apply_tokens":
+            cur.execute(
+                "UPDATE apply_tokens SET used = TRUE WHERE token::text = %s",
+                (token,),
+            )
+        else:  # legacy en matches
+            cur.execute(
+                "UPDATE matches SET apply_token_used = TRUE WHERE apply_token = %s",
+                (token,),
+            )
+        conn.commit()
+
+        # Login implícito
         jwt_user = jwt.encode({"sub": str(applicant_id), "role": "empleado"},
-                              SECRET_KEY, algorithm=ALGORITHM)
+                               SECRET_KEY, algorithm=ALGORITHM)
         return {"success": True, "token": jwt_user, "jobId": job_id}
 
     except HTTPException:
@@ -329,13 +357,13 @@ async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current
     conn = cur = None
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur  = conn.cursor()
 
-        # averiguar label de la oferta
+        # 1) Averiguar label de la oferta
         cur.execute('SELECT COALESCE(label, \'manual\') FROM "Job" WHERE id = %s', (job_id,))
         job_label = (cur.fetchone() or ["manual"])[0]
 
-        # limpiar previa cancelada si existe
+        # 2) Limpiar previa cancelada
         cur.execute(
             """
             SELECT id, status
@@ -353,7 +381,7 @@ async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current
                 raise HTTPException(status.HTTP_409_CONFLICT, detail="Ya estás postulado a esta oferta")
             cur.execute("DELETE FROM proposals WHERE id = %s", (pid,))
 
-        # insertar nueva
+        # 3) Insertar nueva propuesta según label
         if job_label == "automatic":
             cur.execute(
                 """
@@ -407,7 +435,7 @@ async def create_job(data: Dict[str, Any], current_user=Depends(get_current_user
     summary="Crear oferta (admin)",
 )
 async def create_admin_job(request: Request, admin_sub: str = Depends(get_current_admin_sub)):
-    data = await request.json()
+    data    = await request.json()
     raw_uid = data.get("userId")
     try:
         owner_id = int(raw_uid) if raw_uid else None
@@ -421,9 +449,9 @@ async def create_admin_job(request: Request, admin_sub: str = Depends(get_curren
 
     job_id, _ = _insert_job(
         data,
-        owner_id=owner_id,
-        source=data.get("source", "admin"),
-        label_default=data.get("label", "manual"),
+        owner_id=      owner_id,
+        source=        data.get("source", "admin"),
+        label_default=data.get("label",  "manual"),
     )
     return {"message": "Oferta creada", "jobId": job_id}
 
@@ -438,7 +466,7 @@ async def cancel_application(payload: Dict[str, Any], current_user=Depends(get_c
     conn = cur = None
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur  = conn.cursor()
         cur.execute(
             """
             SELECT id
