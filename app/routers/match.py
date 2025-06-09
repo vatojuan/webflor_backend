@@ -1,20 +1,3 @@
-# app/routers/match.py
-
-"""
-Matchings (Job ↔ User)
-
-• GET  /api/match/job/{job_id}/match      – preview (no escribe BD)
-• GET  /api/match/user/{user_id}/match    – preview inverso
-• GET  /api/match/admin                   – panel admin (solo score ≥ 0.80)
-• POST /api/match/resend/{mid}            – reenviar email de match
-
-La rutina run_matching_for_job(job_id) se invoca al crear/actualizar oferta.
-Calcula scores (pgvector) y guarda en matches. Luego envía mails a proposiciones
-con score ≥ 0.80 usando plantilla "empleado" y genera apply_token para postular
-sin login. El resto queda 'pending'.
-
-run_matching_for_user(user_id) recalcula matchings User↔Job para un usuario.
-"""
 from __future__ import annotations
 
 import os
@@ -30,11 +13,11 @@ from jose import jwt, JWTError
 from app.database import get_db_connection
 from app.routers.proposal import send_mail, send_whatsapp
 
-# Configuración & auth
+# ─────────────────── Configuración & Autenticación ───────────────────
 SECRET_KEY   = os.getenv("SECRET_KEY", "")
 ALGORITHM    = os.getenv("ALGORITHM", "HS256")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://fapmendoza.online")
-# Forzar .online
+# Forzar dominio .online si quedó .com
 if FRONTEND_URL.endswith(".com"):
     FRONTEND_URL = "https://fapmendoza.online"
 
@@ -51,7 +34,7 @@ def get_current_admin(token: str = Depends(oauth2_admin)) -> str:
         raise HTTPException(401, "Token admin inválido o requerido")
 
 
-# Helpers
+# ─────────────────── Helpers ───────────────────
 
 def _cur_to_dicts(cur) -> List[Dict[str, Any]]:
     cols = [c[0] for c in cur.description]
@@ -80,24 +63,24 @@ def _apply_tpl(tpl: Dict[str, str], ctx: Dict[str, str]) -> Dict[str, str]:
     return {"subject": subj or "(sin asunto)", "body": body}
 
 
-# Matching batch (oferta nueva)
+# ═══════════ Matching batch (oferta nueva) ═══════════
 
 def run_matching_for_job(job_id: int) -> None:
     conn = cur = None
     try:
         conn = get_db_connection()
         cur  = conn.cursor()
-        # Obtener embedding
+        # 1) Embedding de la oferta
         cur.execute('SELECT embedding FROM "Job" WHERE id=%s AND embedding IS NOT NULL', (job_id,))
         row = cur.fetchone()
         if not row:
-            logger.info("Oferta %d sin embedding", job_id)
+            logger.info("run_matching_for_job: oferta %d sin embedding", job_id)
             return
         emb = row[0]
-        # Borrar previos
+        # 2) Borrar previos
         cur.execute("DELETE FROM matches WHERE job_id=%s", (job_id,))
         conn.commit()
-        # Insertar nuevos pendientes
+        # 3) Insertar pendientes
         cur.execute(
             """
             INSERT INTO matches (job_id, user_id, score, status)
@@ -110,18 +93,18 @@ def run_matching_for_job(job_id: int) -> None:
             (job_id, emb),
         )
         conn.commit()
-        # Enviar a top scorers
+        # 4) Enviar a top scorers
         cur.execute(
             """
             SELECT m.id, m.score,
                    u.name, u.email, u."cvUrl",
                    j.title
               FROM matches m
-              JOIN "User"  u ON u.id = m.user_id
-              JOIN "Job"   j ON j.id = m.job_id
-             WHERE m.job_id=%s AND m.score >= 0.80
+              JOIN "User" u ON u.id = m.user_id
+              JOIN "Job" j  ON j.id = m.job_id
+             WHERE m.job_id=%s AND m.score >= %s
             """,
-            (job_id,),
+            (job_id, 0.80),
         )
         tpl = _get_default_tpl(cur, "empleado")
         for mid, score, name, email, cv, title in cur.fetchall():
@@ -129,7 +112,9 @@ def run_matching_for_job(job_id: int) -> None:
                 continue
             token = secrets.token_urlsafe(32)
             link  = f"{FRONTEND_URL}/apply/{token}"
+            # Guardar token
             cur.execute("UPDATE matches SET apply_token=%s WHERE id=%s", (token, mid))
+            # Preparar email
             ctx = {
                 "applicant_name": name,
                 "job_title":      title,
@@ -153,7 +138,7 @@ def run_matching_for_job(job_id: int) -> None:
         if conn: conn.close()
 
 
-# Matching batch (usuario nuevo)
+# ═══════════ Matching batch (usuario nuevo) ═══════════
 
 def run_matching_for_user(user_id: int) -> None:
     conn = cur = None
@@ -165,7 +150,7 @@ def run_matching_for_user(user_id: int) -> None:
         cur.execute('SELECT embedding FROM "User" WHERE id=%s AND embedding IS NOT NULL', (user_id,))
         row = cur.fetchone()
         if not row:
-            logger.info("Usuario %d sin embedding", user_id)
+            logger.info("run_matching_for_user: usuario %d sin embedding", user_id)
             return
         emb = row[0]
         cur.execute(
@@ -188,7 +173,7 @@ def run_matching_for_user(user_id: int) -> None:
         if conn: conn.close()
 
 
-# Panel admin + reenviar + previews
+# ═══════════ Panel admin + reenviar + previews ═══════════
 @router.get(
     "/admin",
     dependencies=[Depends(get_current_admin)],
@@ -204,11 +189,12 @@ def list_matchings():
                    json_build_object('id', j.id, 'title', j.title) AS job,
                    json_build_object('id', u.id, 'email', u.email)   AS user
               FROM matches m
-              JOIN "Job"  j ON j.id = m.job_id
+              JOIN "Job" j ON j.id = m.job_id
               JOIN "User" u ON u.id = m.user_id
-             WHERE m.score >= 0.80
+             WHERE m.score >= %s
              ORDER BY m.sent_at DESC NULLS FIRST, m.id DESC
-            """
+            """,
+            (0.80,),
         )
         return _cur_to_dicts(cur)
     finally:
@@ -228,26 +214,26 @@ def resend_matching(mid: int):
         cur.execute(
             """
             SELECT m.score, m.apply_token,
-                   u.name, u.email, u."cvUrl",
-                   j.title
+                   u.name AS cand_name, u.email AS cand_email, u."cvUrl" AS cand_cv,
+                   j.title AS job_title
               FROM matches m
               JOIN "User" u ON u.id = m.user_id
               JOIN "Job"  j ON j.id = m.job_id
              WHERE m.id = %s
             """,
-            (mid,)
+            (mid,),
         )
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "Matching no encontrado")
-        score, token, name, email, cv, title = row
+        score, token, name, email, cv, job_title = row
         if not email:
             raise HTTPException(400, "Candidato sin email")
         tpl = _get_default_tpl(cur, "empleado")
-        link = f"{FRONTEND_URL}/apply/{token}"
+        link = f"{FRONTEND_URL}/apply/{token or ''}"
         ctx = {
             "applicant_name": name,
-            "job_title":      title,
+            "job_title":      job_title,
             "cv_url":         cv or "",
             "score":          f"{round(score*100,1)}%",
             "apply_link":     link,
@@ -290,7 +276,7 @@ def match_for_job(job_id: int):
             """,
             (emb,),
         )
-        return {"matches": [{"userId":r[0],"email":r[1],"score":float(r[2])} for r in cur.fetchall()]}  
+        return {"matches": [{"userId":r[0],"email":r[1],"score":float(r[2])} for r in cur.fetchall()]}
     finally:
         if cur: cur.close()
         if conn: conn.close()
