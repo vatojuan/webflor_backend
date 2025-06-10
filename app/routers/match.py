@@ -4,14 +4,14 @@ import os
 import secrets
 import logging
 import traceback
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 
 from app.database import get_db_connection
-from app.routers.proposal import send_mail
+from app.routers.proposal import send_mail  # sólo email aquí
 
 # ─────────────────── Configuración & autenticación ───────────────────
 SECRET_KEY   = os.getenv("SECRET_KEY", "")
@@ -77,52 +77,59 @@ def run_matching_for_job(job_id: int) -> None:
         )
         row = cur.fetchone()
         if not row:
-            logger.info("run_matching_for_job: oferta %d sin embedding", job_id)
+            logger.info(f"run_matching_for_job: oferta {job_id} sin embedding, se omite.")
             return
         emb = row[0]
 
-        # 2) Borrar matchings previos
+        # 2) Borrar previos
+        logger.info(f"run_matching_for_job: borrando matchings previos para oferta {job_id}")
         cur.execute("DELETE FROM matches WHERE job_id = %s", (job_id,))
         conn.commit()
 
         # 3) Insertar todos los nuevos con status 'pending'
+        logger.info(f"run_matching_for_job: insertando matchings pendientes para oferta {job_id}")
         cur.execute(
             """
             INSERT INTO matches (job_id, user_id, score, status)
-            SELECT
-              %s,
-              u.id,
-              (1.0 - (u.embedding::vector <=> %s::vector)),
-              'pending'
-            FROM "User" u
-            WHERE u.embedding IS NOT NULL
+            SELECT %s, u.id,
+                   (1.0 - (u.embedding::vector <=> %s::vector)),
+                   'pending'
+              FROM "User" u
+             WHERE u.embedding IS NOT NULL
             """,
             (job_id, emb),
         )
         conn.commit()
+        logger.info(f"run_matching_for_job: insertados {cur.rowcount} matchings pendientes")
 
-        # 4) Para cada matching con score ≥ 0.80, generar token y enviar email
+        # 4) Traer todos y filtrar en Python
+        logger.info(f"run_matching_for_job: consultando todos los matchings para oferta {job_id}")
         cur.execute(
             """
             SELECT m.id, m.score,
                    u.name, u.email, u."cvUrl",
                    j.title
               FROM matches m
-              JOIN "User" u ON u.id = m.user_id
-              JOIN "Job"  j ON j.id = m.job_id
+              JOIN "User" u ON u.id   = m.user_id
+              JOIN "Job"  j ON j.id   = m.job_id
              WHERE m.job_id = %s
-               AND (m.score)::float >= %s
             """,
-            (job_id, 0.80),
+            (job_id,),
         )
+        all_matches = cur.fetchall()
         tpl = _get_default_tpl(cur, "empleado")
+        logger.info(f"run_matching_for_job: obtenidos {len(all_matches)} matchings, filtrando ≥ 0.80")
 
-        for mid, score, name, email, cv, title in cur.fetchall():
+        for mid, score, name, email, cv, title in all_matches:
+            sc = float(score)
+            if sc < 0.80:
+                logger.debug(f"skip match {mid} score={sc:.2f} < 0.80")
+                continue
             if not email:
-                logger.warning("match %d sin email; se omite", mid)
+                logger.warning(f"match {mid} sin email; se omite")
                 continue
 
-            logger.info("📤 Enviando match %d → %s (score %.2f)", mid, email, score)
+            logger.info(f"📤 Enviando match {mid} → {email} (score={sc:.2f})")
 
             # Generar enlace seguro
             token      = secrets.token_urlsafe(32)
@@ -140,31 +147,31 @@ def run_matching_for_job(job_id: int) -> None:
                 "applicant_name": name,
                 "job_title":      title,
                 "cv_url":         cv or "",
-                "score":          f"{round(score*100,1)}%",
+                "score":          f"{round(sc*100,1)}%",
                 "apply_link":     apply_link,
                 "created_at":     "",
             }
             msg = _apply_tpl(tpl, ctx)
-
             try:
                 send_mail(email, msg["subject"], msg["body"], cv)
                 cur.execute(
                     "UPDATE matches SET status='sent', sent_at=NOW() WHERE id = %s",
                     (mid,),
                 )
+                conn.commit()
+                logger.info(f"✅ Email enviado exitosamente a {email}")
             except Exception as e:
-                logger.exception("Error enviando match %d", mid)
-                # Marcar fallo explícito
+                logger.exception(f"❌ Error enviando match {mid} a {email}")
                 cur.execute(
                     "UPDATE matches SET status='error', error_msg=%s WHERE id = %s",
                     (str(e)[:250], mid),
                 )
-            conn.commit()
+                conn.commit()
 
     except Exception:
         if conn:
             conn.rollback()
-        logger.exception("run_matching_for_job error")
+        logger.exception("run_matching_for_job error inesperado")
     finally:
         if cur:
             cur.close()
@@ -180,41 +187,39 @@ def run_matching_for_user(user_id: int) -> None:
         conn = get_db_connection()
         cur  = conn.cursor()
 
-        # Borrar previos para este usuario
+        logger.info(f"run_matching_for_user: borrando previos para usuario {user_id}")
         cur.execute("DELETE FROM matches WHERE user_id = %s", (user_id,))
         conn.commit()
 
-        # Obtener embedding del usuario
         cur.execute(
             'SELECT embedding FROM "User" WHERE id = %s AND embedding IS NOT NULL',
             (user_id,),
         )
         row = cur.fetchone()
         if not row:
-            logger.info("run_matching_for_user: usuario %d sin embedding", user_id)
+            logger.info(f"run_matching_for_user: usuario {user_id} sin embedding, se omite.")
             return
         emb = row[0]
 
-        # Insertar nuevos pendientes
+        logger.info(f"run_matching_for_user: insertando matchings pendientes para usuario {user_id}")
         cur.execute(
             """
             INSERT INTO matches (job_id, user_id, score, status)
-            SELECT
-              j.id,
-              %s,
-              (1.0 - (j.embedding::vector <=> %s::vector)),
-              'pending'
-            FROM "Job" j
-            WHERE j.embedding IS NOT NULL
+            SELECT j.id, %s,
+                   (1.0 - (j.embedding::vector <=> %s::vector)),
+                   'pending'
+              FROM "Job" j
+             WHERE j.embedding IS NOT NULL
             """,
             (user_id, emb),
         )
         conn.commit()
+        logger.info(f"run_matching_for_user: insertados {cur.rowcount} matchings pendientes")
 
     except Exception:
         if conn:
             conn.rollback()
-        logger.exception("run_matching_for_user error")
+        logger.exception("run_matching_for_user error inesperado")
     finally:
         if cur:
             cur.close()
@@ -291,17 +296,14 @@ def resend_matching(mid: int):
             "applicant_name": name,
             "job_title":      job_title,
             "cv_url":         cv or "",
-            "score":          f"{round(score*100,1)}%",
+            "score":          f"{round(float(score)*100,1)}%",
             "apply_link":     link,
             "created_at":     "",
         }
         msg = _apply_tpl(tpl, ctx)
 
         send_mail(email, msg["subject"], msg["body"], cv)
-        cur.execute(
-            "UPDATE matches SET sent_at=NOW(), status='resent' WHERE id = %s",
-            (mid,),
-        )
+        cur.execute("UPDATE matches SET sent_at=NOW(), status='resent' WHERE id=%s", (mid,))
         conn.commit()
         return {"message": "reenviado"}
 
@@ -310,7 +312,7 @@ def resend_matching(mid: int):
     except Exception:
         if conn:
             conn.rollback()
-        logger.exception("Error reenviando matching %d", mid)
+        logger.exception("resend_matching error inesperado")
         raise HTTPException(500, "Error interno")
     finally:
         if cur:
