@@ -6,13 +6,18 @@ Matchings (Job ↔ User)
 • GET  /api/match/job/{job_id}/match      → preview (no escribe BD)
 • GET  /api/match/user/{user_id}/match    → preview inverso
 • GET  /api/match/admin                   → panel admin (solo score ≥ 0.80)
-• POST /api/match/resend/{mid}            → reenviar email de match
+• POST /api/match/resend/{mid}            → reenviar email de matching
 
-run_matching_for_job(job_id) se invoca al crear/actualizar oferta:
-  - inserta todos los posibles matchings con status='pending'
-  - para score ≥ 0.80: genera apply_token, envía mail y marca status='sent'
-run_matching_for_user(user_id) recalcula matchings User→Job para un usuario.
+Al crear o actualizar una oferta, run_matching_for_job dispara:
+1) Borra previos matchings de la oferta.
+2) Inserta todos con status='pending'.
+3) Para cada score ≥ 0.80:
+   • genera apply_token,
+   • envía email con enlace FRONTEND_URL/apply/{token},
+   • marca status='sent' y sent_at.
+run_matching_for_user recálcula matchings User→Job (status='pending').
 """
+
 from __future__ import annotations
 
 import os
@@ -26,12 +31,13 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 
 from app.database import get_db_connection
-from app.routers.proposal import send_mail  # send_whatsapp no se usa aquí
+from app.routers.proposal import send_mail  # solo email aquí
 
 # ─────────────────── Configuración & autenticación ───────────────────
 SECRET_KEY   = os.getenv("SECRET_KEY", "")
 ALGORITHM    = os.getenv("ALGORITHM", "HS256")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://fapmendoza.online")
+# Forzar dominio .online si quedó .com
 if FRONTEND_URL.endswith(".com"):
     FRONTEND_URL = "https://fapmendoza.online"
 
@@ -47,7 +53,7 @@ def get_current_admin(token: str = Depends(oauth2_admin)) -> str:
         raise HTTPException(401, "Token admin inválido o requerido")
 
 
-# ─────────────────── Helpers ───────────────────
+# ─────────────────── Helpers internos ───────────────────
 
 def _cur_to_dicts(cur) -> List[Dict[str, Any]]:
     cols = [c[0] for c in cur.description]
@@ -91,15 +97,15 @@ def run_matching_for_job(job_id: int) -> None:
         )
         row = cur.fetchone()
         if not row:
-            logger.info("Oferta %d sin embedding", job_id)
+            logger.info("run_matching_for_job: oferta %d sin embedding", job_id)
             return
         emb = row[0]
 
-        # 2) Borrar previos
+        # 2) Borrar matchings previos
         cur.execute("DELETE FROM matches WHERE job_id = %s", (job_id,))
         conn.commit()
 
-        # 3) Insertar nuevos pendientes
+        # 3) Insertar todos los nuevos con status 'pending'
         cur.execute(
             """
             INSERT INTO matches (job_id, user_id, score, status)
@@ -115,7 +121,7 @@ def run_matching_for_job(job_id: int) -> None:
         )
         conn.commit()
 
-        # 4) Enviar a los top scorers (castear score a float)
+        # 4) Para cada matching con score ≥ 0.80, generar token y enviar email
         cur.execute(
             """
             SELECT m.id, m.score,
@@ -135,17 +141,18 @@ def run_matching_for_job(job_id: int) -> None:
             if not email:
                 continue
 
-            # Generar token y enlace
+            # Generar enlace seguro
             token      = secrets.token_urlsafe(32)
             apply_link = f"{FRONTEND_URL}/apply/{token}"
 
-            # Guardar token
+            # Guardar token en matches y confirmar UPDATE
             cur.execute(
                 "UPDATE matches SET apply_token = %s WHERE id = %s",
                 (token, mid),
             )
+            conn.commit()
 
-            # Preparar y enviar mail
+            # Preparar contexto y enviar correo
             ctx = {
                 "applicant_name": name,
                 "job_title":      title,
@@ -155,17 +162,15 @@ def run_matching_for_job(job_id: int) -> None:
                 "created_at":     "",
             }
             msg = _apply_tpl(tpl, ctx)
-
             try:
                 send_mail(email, msg["subject"], msg["body"], cv)
                 cur.execute(
                     "UPDATE matches SET status='sent', sent_at=NOW() WHERE id = %s",
                     (mid,),
                 )
+                conn.commit()
             except Exception:
                 logger.exception("Error enviando match %d", mid)
-
-        conn.commit()
 
     except Exception:
         if conn:
@@ -186,7 +191,7 @@ def run_matching_for_user(user_id: int) -> None:
         conn = get_db_connection()
         cur  = conn.cursor()
 
-        # Borrar previos
+        # Borrar previos para este usuario
         cur.execute("DELETE FROM matches WHERE user_id = %s", (user_id,))
         conn.commit()
 
@@ -197,7 +202,7 @@ def run_matching_for_user(user_id: int) -> None:
         )
         row = cur.fetchone()
         if not row:
-            logger.info("Usuario %d sin embedding", user_id)
+            logger.info("run_matching_for_user: usuario %d sin embedding", user_id)
             return
         emb = row[0]
 
@@ -228,7 +233,7 @@ def run_matching_for_user(user_id: int) -> None:
             conn.close()
 
 
-# ═══════════ Panel admin + reenviar + previews ═══════════
+# ═══════════ Panel admin, reenviar y previews ═══════════
 
 @router.get(
     "/admin",
@@ -238,14 +243,15 @@ def run_matching_for_user(user_id: int) -> None:
 def list_matchings():
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur  = conn.cursor()
         cur.execute(
             """
             SELECT m.id, m.score, m.sent_at, m.status,
                    json_build_object('id', j.id, 'title', j.title) AS job,
                    json_build_object('id', u.id, 'email', u.email)   AS user
               FROM matches m
-              JOIN "Job" j ON j.id = m.job_id
+              JOIN "Job"  j ON j.id = m.job_id
               JOIN "User" u ON u.id = m.user_id
              WHERE (m.score)::float >= %s
              ORDER BY m.sent_at DESC NULLS FIRST, m.id DESC
@@ -263,13 +269,13 @@ def list_matchings():
 @router.post(
     "/resend/{mid}",
     dependencies=[Depends(get_current_admin)],
-    summary="Reenviar mail de matching",
+    summary="Reenviar email de matching",
 )
 def resend_matching(mid: int):
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
-
+        conn = get_db_connection()
+        cur  = conn.cursor()
         cur.execute(
             """
             SELECT m.score, m.apply_token,
@@ -285,19 +291,19 @@ def resend_matching(mid: int):
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "Matching no encontrado")
-        score, token, name, email, cv, job_title = row
 
+        score, token, name, email, cv, job_title = row
         if not email:
             raise HTTPException(400, "Candidato sin email")
 
         tpl = _get_default_tpl(cur, "empleado")
-        link = f"{FRONTEND_URL}/apply/{token}"
+        apply_link = f"{FRONTEND_URL}/apply/{token}"
         ctx = {
             "applicant_name": name,
             "job_title":      job_title,
             "cv_url":         cv or "",
             "score":          f"{round(score*100,1)}%",
-            "apply_link":     link,
+            "apply_link":     apply_link,
             "created_at":     "",
         }
         msg = _apply_tpl(tpl, ctx)
@@ -315,7 +321,7 @@ def resend_matching(mid: int):
     except Exception:
         if conn:
             conn.rollback()
-        logger.exception("Error reenviando matching %d", mid)
+        logger.exception("Error reenviando match %d", mid)
         raise HTTPException(500, "Error interno")
     finally:
         if cur:
@@ -328,7 +334,8 @@ def resend_matching(mid: int):
 def match_for_job(job_id: int):
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur  = conn.cursor()
         cur.execute(
             'SELECT embedding FROM "Job" WHERE id = %s AND embedding IS NOT NULL',
             (job_id,),
@@ -337,6 +344,7 @@ def match_for_job(job_id: int):
         if not row:
             raise HTTPException(404, "Oferta sin embedding")
         emb = row[0]
+
         cur.execute(
             """
             SELECT u.id, u.email,
@@ -360,7 +368,8 @@ def match_for_job(job_id: int):
 def match_for_user(user_id: int):
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur  = conn.cursor()
         cur.execute(
             'SELECT embedding FROM "User" WHERE id = %s AND embedding IS NOT NULL',
             (user_id,),
@@ -369,6 +378,7 @@ def match_for_user(user_id: int):
         if not row:
             raise HTTPException(404, "Usuario sin embedding")
         emb = row[0]
+
         cur.execute(
             """
             SELECT j.id, j.title,
