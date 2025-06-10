@@ -3,9 +3,10 @@
 """
 Ofertas de empleo
 ────────────────────────────────────────────────────────────
-• GET    /api/job/                      – listar ofertas vigentes
+• GET    /api/job/                      – listar ofertas vigentes (con candidatesCount)
+• GET    /api/job/{job_id}              – detalles de una oferta
 • GET    /api/job/list                  – alias legacy
-• GET    /api/job/my-applications       – postulaciones del usuario
+• GET    /api/job/my-applications       – postulaciones del usuario (con datos de job)
 • POST   /api/job/create                – alta de oferta por EMPLEADOR
 • POST   /api/job/create-admin          – alta de oferta por ADMIN
 • GET    /api/job/apply/{token}         – confirma enlace y crea postulación
@@ -33,7 +34,6 @@ from app.database import get_db_connection
 from app.routers.match import run_matching_for_job  # debe existir
 from app.routers.proposal import deliver           # función de envío
 
-# ───────────────────────────────────────────────────────
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 ALGORITHM  = os.getenv("ALGORITHM", "HS256")
@@ -137,8 +137,7 @@ def _insert_job(
         cur = conn.cursor()
         cur.execute('SELECT email, phone FROM "User" WHERE id=%s', (owner_id,))
         mail_fb, phone_fb = cur.fetchone() or ("", "")
-        cur.close()
-        conn.close()
+        cur.close(); conn.close()
         contact_email = contact_email or mail_fb
         contact_phone = contact_phone or phone_fb
 
@@ -183,69 +182,94 @@ def _insert_job(
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error al crear oferta")
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        if conn: conn.close()
 
     # matching en background
     threading.Thread(target=run_matching_for_job, args=(job_id,), daemon=True).start()
     return job_id, contact_email or ""
 
 
-# ═════════════ LISTADO / APLICACIONES ═════════════
-@router.get("/", summary="Listar ofertas activas")
+# ═════════════ LISTADO / DETALLE ═════════════
+@router.get("/", summary="Listar ofertas activas con conteo de postulaciones")
 @router.get("/list", include_in_schema=False)
 async def list_jobs(userId: Optional[int] = None):
     conn = cur = None
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        has_source = job_has_column(cur, "source")
-        has_label  = job_has_column(cur, "label")
-
-        base = ['id','title','description','requirements','"expirationDate"','"userId"']
-        sel  = base + [
-            ("source" if has_source else "NULL AS source"),
-            ("label"  if has_label  else "NULL AS label")
-        ]
-
-        sql = (
-            f'SELECT {",".join(sel)} FROM public."Job" '
-            'WHERE "expirationDate" IS NULL OR "expirationDate" > NOW()'
+        conn = get_db_connection(); cur = conn.cursor()
+        # contar postulaciones activas por job
+        cur.execute(
+            """
+            SELECT
+              j.id, j.title, j.description, j.requirements, j."expirationDate", j."userId",
+              COALESCE(j.source, '') AS source,
+              COALESCE(j.label, '')  AS label,
+              COUNT(p.*) FILTER (WHERE p.status NOT IN ('cancelled','rejected')) AS "candidatesCount"
+            FROM "Job" j
+            LEFT JOIN proposals p ON p.job_id = j.id
+            WHERE j."expirationDate" IS NULL OR j."expirationDate" > NOW()
+            """ + ( ' AND j."userId"=%s' if userId else '' ) + """
+            GROUP BY j.id
+            ORDER BY j.id DESC
+            """,
+            (userId,) if userId else (),
         )
-        params: Tuple = ()
-        if userId is not None:
-            sql += ' AND "userId"=%s'
-            params = (userId,)
-        sql += " ORDER BY id DESC"
-        cur.execute(sql, params)
-
         cols = [d[0] for d in cur.description]
         return {"offers": [dict(zip(cols, r)) for r in cur.fetchall()]}
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        if conn: conn.close()
 
 
+@router.get("/{job_id}", summary="Obtener detalles de una oferta")
+async def get_job(job_id: int):
+    conn = cur = None
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+              j.id, j.title, j.description, j.requirements, j."expirationDate", j."userId",
+              COUNT(p.*) FILTER (WHERE p.status NOT IN ('cancelled','rejected')) AS "candidatesCount"
+            FROM "Job" j
+            LEFT JOIN proposals p ON p.job_id = j.id
+            WHERE j.id = %s
+            GROUP BY j.id
+            """,
+            (job_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Oferta no encontrada")
+        cols = [d[0] for d in cur.description]
+        return {"job": dict(zip(cols, row))}
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+# ═════════════ POSTULACIONES DEL USUARIO ═════════════
 @router.get("/my-applications", summary="Postulaciones del usuario")
 async def my_applications(current_user=Depends(get_current_user)):
     conn = cur = None
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+        conn = get_db_connection(); cur = conn.cursor()
         cur.execute(
             """
             SELECT
               p.id,
-              p.job_id       AS "jobId",
+              j.id            AS "jobId",
+              j.title         AS "jobTitle",
+              j.created_at    AS "jobPostedAt",
+              COUNT(p2.*)     FILTER (WHERE p2.status NOT IN ('cancelled','rejected')) AS "candidatesCount",
               p.status,
-              p.created_at   AS "createdAt"
+              p.created_at    AS "createdAt"
             FROM proposals p
+            JOIN "Job" j ON j.id = p.job_id
+            LEFT JOIN proposals p2 ON p2.job_id = j.id
             WHERE p.applicant_id = %s
               AND p.status NOT IN ('cancelled','rejected')
+            GROUP BY p.id, j.id
             ORDER BY p.created_at DESC
             """,
             (current_user.id,),
@@ -253,10 +277,8 @@ async def my_applications(current_user=Depends(get_current_user)):
         cols = [d[0] for d in cur.description]
         return {"applications": [dict(zip(cols, r)) for r in cur.fetchall()]}
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        if conn: conn.close()
 
 
 # ═════════════ CONFIRMACIÓN POR ENLACE (APPLY) ═════════════
@@ -264,43 +286,23 @@ async def my_applications(current_user=Depends(get_current_user)):
 async def confirm_apply(token: str = Path(..., description="Token enviado por email")):
     conn = cur = None
     try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-
-        # 1) Intentar en apply_tokens
+        conn = get_db_connection(); cur = conn.cursor()
+        # Intentar en apply_tokens
         cur.execute(
             """
-            SELECT job_id, applicant_id, 'apply_tokens' AS origin
+            SELECT job_id, applicant_id
               FROM apply_tokens
              WHERE token::text = %s
-               AND used       = FALSE
+               AND used = FALSE
                AND expires_at > NOW()
             """,
             (token,),
         )
         row = cur.fetchone()
-
-        # 2) Si no existe, buscar en matches.apply_token
-        if not row:
-            cur.execute(
-                """
-                SELECT job_id,
-                       user_id      AS applicant_id,
-                       'matches'    AS origin
-                  FROM matches
-                 WHERE apply_token = %s
-                   AND (apply_token_used IS NULL OR apply_token_used = FALSE)
-                """,
-                (token,),
-            )
-            row = cur.fetchone()
-
         if not row:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Token inválido o expirado")
-
-        job_id, applicant_id, origin = row
-
-        # 3) Insertar propuesta en waiting + commit
+        job_id, applicant_id = row
+        # crear la propuesta y enviarla
         cur.execute(
             """
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
@@ -310,41 +312,20 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
             (job_id, applicant_id),
         )
         pid = cur.fetchone()[0]
+        cur.execute("UPDATE apply_tokens SET used = TRUE WHERE token::text = %s", (token,))
         conn.commit()
-
-        # Lanzar envío en background
         threading.Thread(target=deliver, args=(pid, True), daemon=True).start()
-
-        # 4) Marcar token como usado en la tabla correcta
-        if origin == "apply_tokens":
-            cur.execute(
-                "UPDATE apply_tokens SET used = TRUE WHERE token::text = %s",
-                (token,),
-            )
-        else:  # legacy en matches
-            cur.execute(
-                "UPDATE matches SET apply_token_used = TRUE WHERE apply_token = %s",
-                (token,),
-            )
-        conn.commit()
-
-        # Login implícito
-        jwt_user = jwt.encode({"sub": str(applicant_id), "role": "empleado"},
-                               SECRET_KEY, algorithm=ALGORITHM)
+        jwt_user = jwt.encode({"sub": str(applicant_id), "role": "empleado"}, SECRET_KEY, algorithm=ALGORITHM)
         return {"success": True, "token": jwt_user, "jobId": job_id}
-
     except HTTPException:
         raise
     except Exception as e:
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        if conn: conn.close()
 
 
 # ═════════════ POSTULAR DIRECTAMENTE (WEB) ═════════════
@@ -353,17 +334,10 @@ async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current
     job_id = payload.get("jobId")
     if not job_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Falta jobId")
-
     conn = cur = None
     try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-
-        # 1) Averiguar label de la oferta
-        cur.execute('SELECT COALESCE(label, \'manual\') FROM "Job" WHERE id = %s', (job_id,))
-        job_label = (cur.fetchone() or ["manual"])[0]
-
-        # 2) Limpiar previa cancelada
+        conn = get_db_connection(); cur = conn.cursor()
+        # limpiar previa cancelada
         cur.execute(
             """
             SELECT id, status
@@ -375,85 +349,49 @@ async def apply_to_job(payload: Dict[str, Any], current_user=Depends(get_current
             (job_id, current_user.id),
         )
         prev = cur.fetchone()
+        if prev and prev[1] != "cancelled":
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="Ya estás postulado a esta oferta")
         if prev:
-            pid, st = prev
-            if st != "cancelled":
-                raise HTTPException(status.HTTP_409_CONFLICT, detail="Ya estás postulado a esta oferta")
-            cur.execute("DELETE FROM proposals WHERE id = %s", (pid,))
-
-        # 3) Insertar nueva propuesta según label
-        if job_label == "automatic":
-            cur.execute(
-                """
-                INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-                VALUES (%s, %s, 'automatic', 'waiting', NOW())
-                RETURNING id
-                """,
-                (job_id, current_user.id),
-            )
-            pid = cur.fetchone()[0]
-            conn.commit()
-            threading.Thread(target=deliver, args=(pid, True), daemon=True).start()
-        else:
-            cur.execute(
-                """
-                INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-                VALUES (%s, %s, 'manual', 'pending', NOW())
-                """,
-                (job_id, current_user.id),
-            )
-            conn.commit()
-
+            cur.execute("DELETE FROM proposals WHERE id = %s", (prev[0],))
+        # insertar nueva manual
+        cur.execute(
+            """
+            INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
+            VALUES (%s, %s, 'manual', 'pending', NOW())
+            """,
+            (job_id, current_user.id),
+        )
+        conn.commit()
         return {"message": "Postulación registrada"}
-
     except HTTPException:
         raise
     except Exception:
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno al postular")
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        if conn: conn.close()
 
 
-# ═════════════ CREACIÓN POR EMPLEADOR ═════════════
+# ═════════════ CREACIÓN POR EMPLEADOR & ADMIN ═════════════
 @router.post("/create", status_code=status.HTTP_201_CREATED, summary="Crear oferta (empleador)")
 async def create_job(data: Dict[str, Any], current_user=Depends(get_current_user)):
     job_id, _ = _insert_job(data, owner_id=current_user.id, source="employer")
     return {"message": "Oferta creada", "jobId": job_id}
 
-
-# ═════════════ CREACIÓN POR ADMIN ═════════════
-@router.post(
-    "/create-admin",
-    status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(oauth2_admin)],
-    summary="Crear oferta (admin)",
-)
+@router.post("/create-admin", status_code=status.HTTP_201_CREATED, dependencies=[Depends(oauth2_admin)], summary="Crear oferta (admin)")
 async def create_admin_job(request: Request, admin_sub: str = Depends(get_current_admin_sub)):
-    data    = await request.json()
+    data = await request.json()
     raw_uid = data.get("userId")
-    try:
-        owner_id = int(raw_uid) if raw_uid else None
-    except:
-        owner_id = None
-
+    try: owner_id = int(raw_uid) if raw_uid else None
+    except: owner_id = None
     if not owner_id:
         owner_id = get_admin_id_by_email(admin_sub)
         if not owner_id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Admin sin usuario asociado")
-
-    job_id, _ = _insert_job(
-        data,
-        owner_id=      owner_id,
-        source=        data.get("source", "admin"),
-        label_default=data.get("label",  "manual"),
-    )
-    return {"message": "Oferta creada", "jobId": job_id}
+    job_id, _ = _insert_job(data, owner_id=owner_id, source=data.get("source","admin"), label_default=data.get("label","manual"))
+    return {"message":"Oferta creada","jobId":job_id}
 
 
 # ═════════════ CANCELAR POSTULACIÓN ═════════════
@@ -462,43 +400,30 @@ async def cancel_application(payload: Dict[str, Any], current_user=Depends(get_c
     job_id = payload.get("jobId")
     if not job_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Falta jobId")
-
     conn = cur = None
     try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
+        conn = get_db_connection(); cur = conn.cursor()
         cur.execute(
             """
             SELECT id
               FROM proposals
-             WHERE job_id = %s
-               AND applicant_id = %s
-               AND status NOT IN ('cancelled','rejected')
+             WHERE job_id=%s AND applicant_id=%s AND status NOT IN ('cancelled','rejected')
              LIMIT 1
             """,
             (job_id, current_user.id),
         )
         row = cur.fetchone()
         if not row:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No existe postulación activa para cancelar")
-        pid = row[0]
-
-        cur.execute(
-            "UPDATE proposals SET status = 'cancelled', cancelled_at = NOW() WHERE id = %s",
-            (pid,),
-        )
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No existe postulación activa")
+        cur.execute("UPDATE proposals SET status='cancelled', cancelled_at=NOW() WHERE id=%s",(row[0],))
         conn.commit()
-        return {"message": "Postulación cancelada"}
-
+        return {"message":"Postulación cancelada"}
     except HTTPException:
         raise
     except Exception:
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno al cancelar")
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        if conn: conn.close()
