@@ -1,23 +1,3 @@
-# app/routers/match.py
-
-"""
-Matchings (Job ↔ User)
-
-• GET  /api/match/job/{job_id}/match      → preview (no escribe BD)
-• GET  /api/match/user/{user_id}/match    → preview inverso
-• GET  /api/match/admin                   → panel admin (solo score ≥ 0.80)
-• POST /api/match/resend/{mid}            → reenviar email de matching
-
-Al crear o actualizar una oferta, run_matching_for_job dispara:
-1) Borra previos matchings de la oferta.
-2) Inserta todos con status='pending'.
-3) Para cada score ≥ 0.80:
-   • genera apply_token,
-   • envía email con enlace FRONTEND_URL/apply/{token},
-   • marca status='sent' y sent_at.
-run_matching_for_user recálcula matchings User→Job (status='pending').
-"""
-
 from __future__ import annotations
 
 import os
@@ -31,7 +11,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 
 from app.database import get_db_connection
-from app.routers.proposal import send_mail  # solo email aquí
+from app.routers.proposal import send_mail
 
 # ─────────────────── Configuración & autenticación ───────────────────
 SECRET_KEY   = os.getenv("SECRET_KEY", "")
@@ -139,13 +119,16 @@ def run_matching_for_job(job_id: int) -> None:
 
         for mid, score, name, email, cv, title in cur.fetchall():
             if not email:
+                logger.warning("match %d sin email; se omite", mid)
                 continue
+
+            logger.info("📤 Enviando match %d → %s (score %.2f)", mid, email, score)
 
             # Generar enlace seguro
             token      = secrets.token_urlsafe(32)
             apply_link = f"{FRONTEND_URL}/apply/{token}"
 
-            # Guardar token en matches y confirmar UPDATE
+            # Guardar token en matches
             cur.execute(
                 "UPDATE matches SET apply_token = %s WHERE id = %s",
                 (token, mid),
@@ -162,15 +145,21 @@ def run_matching_for_job(job_id: int) -> None:
                 "created_at":     "",
             }
             msg = _apply_tpl(tpl, ctx)
+
             try:
                 send_mail(email, msg["subject"], msg["body"], cv)
                 cur.execute(
                     "UPDATE matches SET status='sent', sent_at=NOW() WHERE id = %s",
                     (mid,),
                 )
-                conn.commit()
-            except Exception:
+            except Exception as e:
                 logger.exception("Error enviando match %d", mid)
+                # Marcar fallo explícito
+                cur.execute(
+                    "UPDATE matches SET status='error', error_msg=%s WHERE id = %s",
+                    (str(e)[:250], mid),
+                )
+            conn.commit()
 
     except Exception:
         if conn:
@@ -297,13 +286,13 @@ def resend_matching(mid: int):
             raise HTTPException(400, "Candidato sin email")
 
         tpl = _get_default_tpl(cur, "empleado")
-        apply_link = f"{FRONTEND_URL}/apply/{token}"
+        link = f"{FRONTEND_URL}/apply/{token}"
         ctx = {
             "applicant_name": name,
             "job_title":      job_title,
             "cv_url":         cv or "",
             "score":          f"{round(score*100,1)}%",
-            "apply_link":     apply_link,
+            "apply_link":     link,
             "created_at":     "",
         }
         msg = _apply_tpl(tpl, ctx)
@@ -321,7 +310,7 @@ def resend_matching(mid: int):
     except Exception:
         if conn:
             conn.rollback()
-        logger.exception("Error reenviando match %d", mid)
+        logger.exception("Error reenviando matching %d", mid)
         raise HTTPException(500, "Error interno")
     finally:
         if cur:
