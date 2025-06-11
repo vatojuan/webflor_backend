@@ -29,6 +29,7 @@ def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
     except JWTError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token admin inválido o expirado")
 
+
 # ───────────────────  DB  ───────────────────
 def get_db_connection():
     try:
@@ -42,6 +43,7 @@ def get_db_connection():
         )
     except Exception as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error conexión BD: {e}")
+
 
 def get_admin_config() -> Dict[str, bool]:
     conn = cur = None
@@ -57,6 +59,7 @@ def get_admin_config() -> Dict[str, bool]:
         if cur:  cur.close()
         if conn: conn.close()
 
+
 def get_admin_id(email: str) -> Optional[int]:
     conn = cur = None
     try:
@@ -69,20 +72,32 @@ def get_admin_id(email: str) -> Optional[int]:
         if cur:  cur.close()
         if conn: conn.close()
 
+
 # ───────────────────  Router  ───────────────────
-router = APIRouter(prefix="/api/job", tags=["job_admin"])
+router = APIRouter(
+    prefix="/api/job",
+    tags=["job_admin"],
+)
 
 
 # ════════════════════════════════════════
 # GET /api/job/admin_offers
-# (YA NO REQUIERE TOKEN)
-# ════════════════════════════════════════
-@router.get("/admin_offers", status_code=status.HTTP_200_OK)
-def get_admin_offers():
+# ─────────────────────────────────────────────
+@router.get(
+    "/admin_offers",
+    dependencies=[Depends(get_current_admin)],
+    status_code=status.HTTP_200_OK,
+)
+def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
     """
-    Devuelve todas las ofertas (filtrado de expiradas queda para el front o config),
-    sin necesidad de autenticarse.
+    Devuelve todas las ofertas, filtrando expiradas según configuración.
+    Requiere token admin.
     """
+    cfg               = get_admin_config()
+    show_admin_exp    = cfg.get("show_expired_admin_offers", False)
+    show_employer_exp = cfg.get("show_expired_employer_offers", False)
+    admin_id          = get_admin_id(admin_sub)
+
     conn = cur = None
     try:
         conn = get_db_connection()
@@ -109,13 +124,26 @@ def get_admin_offers():
         offers = []
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
-            # serializar fecha
+
+            # serializar expirationDate y filtrar expiradas
             exp = offer["expirationDate"]
             if exp:
                 if exp.tzinfo is None:
                     exp = exp.replace(tzinfo=timezone.utc)
                 offer["expirationDate"] = exp.isoformat()
+                expired = exp < now
+            else:
+                expired = False
+
+            is_admin_offer = admin_id is not None and offer["userId"] == admin_id
+            if expired:
+                if is_admin_offer and not show_admin_exp:
+                    continue
+                if not is_admin_offer and not show_employer_exp:
+                    continue
+
             offers.append(offer)
+
         return {"offers": offers}
     except Exception as e:
         traceback.print_exc()
@@ -127,21 +155,24 @@ def get_admin_offers():
 
 # ════════════════════════════════════════
 # PUT /api/job/update-admin
-# (SÍ REQUIERE ADMIN)
-# ════════════════════════════════════════
-@router.put("/update-admin", dependencies=[Depends(get_current_admin)], status_code=status.HTTP_200_OK)
+# ─────────────────────────────────────────────
+@router.put(
+    "/update-admin",
+    dependencies=[Depends(get_current_admin)],
+    status_code=status.HTTP_200_OK,
+)
 async def update_admin_offer(request: Request):
-    body = await request.json()
-    job_id       = int(body.get("id") or 0)
-    title        = body.get("title")
-    description  = body.get("description")
-    requirements = body.get("requirements", "")
-    expiration   = body.get("expirationDate")
-    user_id      = int(body.get("userId") or 0)
+    body          = await request.json()
+    job_id        = int(body.get("id") or 0)
+    title         = body.get("title")
+    description   = body.get("description")
+    requirements  = body.get("requirements", "")
+    expiration    = body.get("expirationDate")
+    user_id       = int(body.get("userId") or 0)
     contact_email = body.get("contactEmail") or body.get("contact_email")
     contact_phone = body.get("contactPhone") or body.get("contact_phone")
-    source = body.get("source", "admin")
-    label  = body.get("label",  "automatic")
+    source        = body.get("source", "admin")
+    label         = body.get("label", "automatic")
 
     if not (job_id and title and description and user_id):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Faltan campos obligatorios")
@@ -155,7 +186,7 @@ async def update_admin_offer(request: Request):
         except ValueError:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Formato de fecha inválido")
 
-    # Generar embedding con OpenAI (si lo necesitas; si no, remueve)
+    # Generar embedding con OpenAI (opcional)
     from openai import OpenAI
     client    = OpenAI(api_key=os.getenv("OPENAI_API_KEY",""))
     embedding = client.embeddings.create(
@@ -194,10 +225,17 @@ async def update_admin_offer(request: Request):
                    contact_phone   AS "contactPhone";
             """,
             (
-                title, description, requirements, exp_date,
-                user_id, source, label,
-                contact_email, contact_phone,
-                embedding, job_id,
+                title,
+                description,
+                requirements,
+                exp_date,
+                user_id,
+                source,
+                label,
+                contact_email,
+                contact_phone,
+                embedding,
+                job_id,
             ),
         )
         upd = cur.fetchone()
@@ -205,9 +243,10 @@ async def update_admin_offer(request: Request):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Oferta no encontrada")
         conn.commit()
 
-        keys = [
-            "id","title","description","requirements","expirationDate",
-            "userId","source","label","contactEmail","contactPhone"
+        keys  = [
+            "id","title","description","requirements",
+            "expirationDate","userId","source","label",
+            "contactEmail","contactPhone"
         ]
         offer = dict(zip(keys, upd))
         if offer["expirationDate"]:
@@ -226,9 +265,12 @@ async def update_admin_offer(request: Request):
 
 # ════════════════════════════════════════
 # DELETE /api/job/delete-admin
-# (SÍ REQUIERE ADMIN)
-# ════════════════════════════════════════
-@router.delete("/delete-admin", dependencies=[Depends(get_current_admin)], status_code=status.HTTP_200_OK)
+# ─────────────────────────────────────────────
+@router.delete(
+    "/delete-admin",
+    dependencies=[Depends(get_current_admin)],
+    status_code=status.HTTP_200_OK,
+)
 async def delete_admin_offer(request: Request):
     body   = await request.json()
     job_id = int(body.get("jobId") or 0)
