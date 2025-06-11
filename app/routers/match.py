@@ -16,11 +16,7 @@ from app.routers.proposal import send_mail  # sólo email aquí
 # ─────────────────── Configuración & autenticación ───────────────────
 SECRET_KEY   = os.getenv("SECRET_KEY", "")
 ALGORITHM    = os.getenv("ALGORITHM", "HS256")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://fapmendoza.online")
-# Forzar dominio .online si quedó .com
-if FRONTEND_URL.endswith(".com"):
-    FRONTEND_URL = "https://fapmendoza.online"
-
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://fapmendoza.com").rstrip("/")
 oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/match", tags=["matchings"])
