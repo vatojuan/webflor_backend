@@ -1,4 +1,5 @@
 # app/routers/job_admin.py
+
 import os
 import traceback
 from datetime import datetime, timezone
@@ -6,8 +7,8 @@ from typing import Dict, Optional
 
 import psycopg2
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import APIRouter, Depends, HTTPException, Request, Security
+from fastapi.security import OAuth2PasswordBearer, SecurityScopes
 from jose import jwt, JWTError
 
 load_dotenv()
@@ -17,7 +18,9 @@ SECRET_KEY    = os.getenv("SECRET_KEY")
 ALGORITHM     = os.getenv("ALGORITHM", "HS256")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
-def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
+def get_current_admin_subject(
+    token: str = Security(oauth2_scheme)
+) -> str:
     if not token:
         raise HTTPException(401, "Token no proporcionado")
     try:
@@ -73,7 +76,7 @@ def get_admin_id(email: str) -> Optional[int]:
 router = APIRouter(
     prefix="/api/job",
     tags=["job_admin"],
-    dependencies=[Depends(get_current_admin)],
+    dependencies=[Depends(get_current_admin_subject)],
 )
 
 
@@ -81,7 +84,9 @@ router = APIRouter(
 # GET /admin_offers
 # ════════════════════════════════════════
 @router.get("/admin_offers")
-def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
+def get_admin_offers(
+    admin_sub: str = Security(get_current_admin_subject)
+):
     cfg               = get_admin_config()
     show_admin_exp    = cfg.get("show_expired_admin_offers", False)
     show_employer_exp = cfg.get("show_expired_employer_offers", False)
@@ -115,7 +120,6 @@ def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
 
-            # formatear expirationDate y filtrar expiradas según config
             exp = offer["expirationDate"]
             if exp:
                 if exp.tzinfo is None:
@@ -125,7 +129,7 @@ def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
             else:
                 expired = False
 
-            is_admin_offer = admin_id is not None and offer["userId"] == admin_id
+            is_admin_offer = (admin_id is not None and offer["userId"] == admin_id)
             if expired:
                 if is_admin_offer and not show_admin_exp:
                     continue
@@ -157,7 +161,6 @@ async def update_admin_offer(request: Request):
     expiration   = body.get("expirationDate")
     user_id      = int(body.get("userId") or 0)
 
-    # aceptar camel o snake
     contact_email = body.get("contactEmail") or body.get("contact_email")
     contact_phone = body.get("contactPhone") or body.get("contact_phone")
 
@@ -177,7 +180,7 @@ async def update_admin_offer(request: Request):
         except ValueError:
             raise HTTPException(400, "Formato de fecha inválido")
 
-    # generar embedding con OpenAI
+    # Generar embedding con OpenAI
     from openai import OpenAI
     client    = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     embedding = client.embeddings.create(
@@ -248,7 +251,6 @@ async def update_admin_offer(request: Request):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, f"Error interno al actualizar: {e}")
-
     finally:
         if cur:  cur.close()
         if conn: conn.close()
@@ -262,7 +264,7 @@ async def delete_admin_offer(request: Request):
     """
     Elimina la oferta y todas las propuestas asociadas:
     1) marca como 'cancelled' propuestas waiting|pending
-    2) borra **todas** las propuestas de ese job
+    2) borra todas las propuestas de ese job
     3) borra la oferta
     """
     body   = await request.json()
@@ -309,7 +311,6 @@ async def delete_admin_offer(request: Request):
             conn.rollback()
         traceback.print_exc()
         raise HTTPException(500, f"Error al eliminar oferta: {e}")
-
     finally:
         if cur:  cur.close()
         if conn: conn.close()
