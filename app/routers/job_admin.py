@@ -44,7 +44,6 @@ def get_db_connection():
     except Exception as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error conexión BD: {e}")
 
-
 def get_admin_config() -> Dict[str, bool]:
     conn = cur = None
     try:
@@ -58,7 +57,6 @@ def get_admin_config() -> Dict[str, bool]:
     finally:
         if cur:  cur.close()
         if conn: conn.close()
-
 
 def get_admin_id(email: str) -> Optional[int]:
     conn = cur = None
@@ -82,7 +80,8 @@ router = APIRouter(
 
 # ════════════════════════════════════════
 # GET /api/job/admin_offers
-# ─────────────────────────────────────────────
+# (REQUIERE ADMIN TOKEN)
+# ════════════════════════════════════════
 @router.get(
     "/admin_offers",
     dependencies=[Depends(get_current_admin)],
@@ -124,7 +123,6 @@ def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
         offers = []
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
-
             # serializar expirationDate y filtrar expiradas
             exp = offer["expirationDate"]
             if exp:
@@ -155,7 +153,8 @@ def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
 
 # ════════════════════════════════════════
 # PUT /api/job/update-admin
-# ─────────────────────────────────────────────
+# (REQUIERE ADMIN TOKEN)
+# ════════════════════════════════════════
 @router.put(
     "/update-admin",
     dependencies=[Depends(get_current_admin)],
@@ -225,17 +224,10 @@ async def update_admin_offer(request: Request):
                    contact_phone   AS "contactPhone";
             """,
             (
-                title,
-                description,
-                requirements,
-                exp_date,
-                user_id,
-                source,
-                label,
-                contact_email,
-                contact_phone,
-                embedding,
-                job_id,
+                title, description, requirements, exp_date,
+                user_id, source, label,
+                contact_email, contact_phone,
+                embedding, job_id,
             ),
         )
         upd = cur.fetchone()
@@ -265,7 +257,8 @@ async def update_admin_offer(request: Request):
 
 # ════════════════════════════════════════
 # DELETE /api/job/delete-admin
-# ─────────────────────────────────────────────
+# (REQUIERE ADMIN TOKEN)
+# ════════════════════════════════════════
 @router.delete(
     "/delete-admin",
     dependencies=[Depends(get_current_admin)],
@@ -309,7 +302,8 @@ async def delete_admin_offer(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        if conn: conn.rollback()
+        if conn:
+            conn.rollback()
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error al eliminar oferta: {e}")
     finally:
