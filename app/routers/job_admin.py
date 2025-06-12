@@ -83,22 +83,36 @@ router = APIRouter(
 # ════════════════════════════════════════
 @router.get(
     "/admin_offers",
+    dependencies=[Depends(get_current_admin)],
     status_code=status.HTTP_200_OK,
 )
-def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
+def get_admin_offers(request: Request):
     """
     Devuelve todas las ofertas, filtrando expiradas según configuración.
     Requiere token admin.
     """
+    auth = request.headers.get("authorization")
+    if not auth or not auth.startswith("Bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token requerido")
+
+    token = auth.replace("Bearer ", "")
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        sub = payload.get("sub")
+        if not sub:
+            raise JWTError()
+    except JWTError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido")
+
     cfg               = get_admin_config()
     show_admin_exp    = cfg.get("show_expired_admin_offers", False)
     show_employer_exp = cfg.get("show_expired_employer_offers", False)
 
     # ✅ Asegurarse de que admin_sub puede ser ID o email
-    if admin_sub.isdigit():
-        admin_id = int(admin_sub)
+    if sub.isdigit():
+        admin_id = int(sub)
     else:
-        admin_id = get_admin_id(admin_sub)
+        admin_id = get_admin_id(sub)
 
     conn = cur = None
     try:
