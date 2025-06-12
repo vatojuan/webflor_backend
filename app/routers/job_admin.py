@@ -81,40 +81,46 @@ router = APIRouter(
 # GET /api/job/admin_offers
 # (REQUIERE ADMIN TOKEN)
 # ════════════════════════════════════════
-@router.get("/admin_offers", status_code=status.HTTP_200_OK)
+
+@router.get(
+    "/admin_offers",
+    status_code=status.HTTP_200_OK,
+)
 def get_admin_offers(request: Request):
     """
     Devuelve todas las ofertas, filtrando expiradas según configuración.
     Requiere token admin.
     """
-    # Extraer y decodificar token manualmente
-    auth = request.headers.get("authorization")
-    if not auth or not auth.startswith("Bearer "):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token requerido")
-
-    token = auth.replace("Bearer ", "")
+    # ────── Extraer y decodificar el token manualmente ──────
+    from jose import jwt, JWTError
+    authorization = request.headers.get("authorization") or ""
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Falta token de autenticación")
+    
+    token = authorization.replace("Bearer ", "")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        sub = payload.get("sub")
-        if not sub:
-            raise JWTError()
+        admin_sub = payload.get("sub")
+        if not admin_sub:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido")
     except JWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido o expirado")
 
+    # ────── Obtener configuración y admin_id ──────
     cfg               = get_admin_config()
     show_admin_exp    = cfg.get("show_expired_admin_offers", False)
     show_employer_exp = cfg.get("show_expired_employer_offers", False)
 
-    # ✅ Obtener ID desde sub (puede ser email o número)
-    if sub.isdigit():
-        admin_id = int(sub)
+    if admin_sub.isdigit():
+        admin_id = int(admin_sub)
     else:
-        admin_id = get_admin_id(sub)
+        admin_id = get_admin_id(admin_sub)
 
+    # ────── Obtener y filtrar ofertas ──────
     conn = cur = None
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur  = conn.cursor()
         cur.execute(
             """
             SELECT
@@ -126,14 +132,14 @@ def get_admin_offers(request: Request):
               "userId",
               source,
               label,
-              contact_email AS "contactEmail",
-              contact_phone AS "contactPhone"
+              contact_email   AS "contactEmail",
+              contact_phone   AS "contactPhone"
             FROM public."Job"
             ORDER BY id DESC;
             """
         )
-        cols = [d[0] for d in cur.description]
-        now = datetime.now(timezone.utc)
+        cols   = [d[0] for d in cur.description]
+        now    = datetime.now(timezone.utc)
         offers = []
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
@@ -156,13 +162,13 @@ def get_admin_offers(request: Request):
             offers.append(offer)
 
         return {"offers": offers}
-
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error al obtener ofertas: {e}")
     finally:
-        if cur: cur.close()
+        if cur:  cur.close()
         if conn: conn.close()
+
 
 # ════════════════════════════════════════
 # PUT /api/job/update-admin
