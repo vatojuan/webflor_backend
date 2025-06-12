@@ -27,11 +27,11 @@ def apply_with_token(token: str):
             """
             SELECT m.id, m.job_id, m.user_id
             FROM matches m
-            WHERE REPLACE(m.apply_token,'=','') = REPLACE(%s,'=','')
-            AND m.status = 'sent'
+            WHERE trim(m.apply_token) = trim(%s)           -- quita tabs, \n, espacios
+            AND m.status       = 'sent'
             AND m.applied_at IS NULL
             """,
-            (token.strip(),),        # strip() quita espacios/nueva línea accidentales
+            (token,),
         )
         row = cur.fetchone()
         if not row:
