@@ -95,7 +95,12 @@ def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
     cfg               = get_admin_config()
     show_admin_exp    = cfg.get("show_expired_admin_offers", False)
     show_employer_exp = cfg.get("show_expired_employer_offers", False)
-    admin_id          = int(admin_sub)
+
+    # ✅ Asegurarse de que admin_sub puede ser ID o email
+    if admin_sub.isdigit():
+        admin_id = int(admin_sub)
+    else:
+        admin_id = get_admin_id(admin_sub)
 
     conn = cur = None
     try:
@@ -123,7 +128,6 @@ def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
         offers = []
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
-            # serializar expirationDate y filtrar expiradas
             exp = offer["expirationDate"]
             if exp:
                 if exp.tzinfo is None:
