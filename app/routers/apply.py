@@ -28,7 +28,7 @@ def apply_with_token(token: str):
             SELECT m.id, m.job_id, m.user_id
               FROM matches m
              WHERE m.apply_token = %s
-               AND m.status      = 'sent'
+               AND m.status IN ('waiting', 'sent')
                AND m.applied_at IS NULL
             """,
             (token,),
