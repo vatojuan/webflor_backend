@@ -26,12 +26,12 @@ def apply_with_token(token: str):
         cur.execute(
             """
             SELECT m.id, m.job_id, m.user_id
-              FROM matches m
-             WHERE m.apply_token = %s
-               AND m.status IN ('waiting', 'sent')
-               AND m.applied_at IS NULL
+            FROM matches m
+            WHERE REPLACE(m.apply_token,'=','') = REPLACE(%s,'=','')
+            AND m.status = 'sent'
+            AND m.applied_at IS NULL
             """,
-            (token,),
+            (token.strip(),),        # strip() quita espacios/nueva línea accidentales
         )
         row = cur.fetchone()
         if not row:
