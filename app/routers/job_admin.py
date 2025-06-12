@@ -83,7 +83,6 @@ router = APIRouter(
 # ════════════════════════════════════════
 @router.get(
     "/admin_offers",
-    dependencies=[Depends(get_current_admin)],
     status_code=status.HTTP_200_OK,
 )
 def get_admin_offers(admin_sub: str = Depends(get_current_admin)):
