@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
+from fastapi import APIRouter, HTTPException, Request, status
 
 load_dotenv()
 
@@ -82,22 +83,18 @@ router = APIRouter(
 # (REQUIERE ADMIN TOKEN)
 # ════════════════════════════════════════
 
-@router.get(
-    "/admin_offers",
-    status_code=status.HTTP_200_OK,
-)
+# 2️⃣  DEFINE LA RUTA SIN Depends, leyendo el token manualmente
+@router.get("/admin_offers", status_code=status.HTTP_200_OK)
 def get_admin_offers(request: Request):
     """
-    Devuelve todas las ofertas, filtrando expiradas según configuración.
-    Requiere token admin.
+    Devuelve todas las ofertas. Requiere token admin (Authorization: Bearer …)
     """
-    # ────── Extraer y decodificar el token manualmente ──────
-    from jose import jwt, JWTError
-    authorization = request.headers.get("authorization") or ""
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Falta token de autenticación")
-    
-    token = authorization.replace("Bearer ", "")
+    # ── Token ───────────────────────────────────────────
+    auth = request.headers.get("authorization")
+    if not auth or not auth.startswith("Bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Falta token")
+
+    token = auth[7:]  # quita 'Bearer '
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         admin_sub = payload.get("sub")
@@ -106,40 +103,27 @@ def get_admin_offers(request: Request):
     except JWTError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido o expirado")
 
-    # ────── Obtener configuración y admin_id ──────
+    # ── Identificar admin_id ────────────────────────────
+    admin_id = int(admin_sub) if admin_sub.isdigit() else get_admin_id(admin_sub)
+
     cfg               = get_admin_config()
     show_admin_exp    = cfg.get("show_expired_admin_offers", False)
     show_employer_exp = cfg.get("show_expired_employer_offers", False)
 
-    if admin_sub.isdigit():
-        admin_id = int(admin_sub)
-    else:
-        admin_id = get_admin_id(admin_sub)
-
-    # ────── Obtener y filtrar ofertas ──────
+    # ── Query BD ────────────────────────────────────────
     conn = cur = None
     try:
         conn = get_db_connection()
         cur  = conn.cursor()
-        cur.execute(
-            """
-            SELECT
-              id,
-              title,
-              description,
-              requirements,
-              "expirationDate",
-              "userId",
-              source,
-              label,
-              contact_email   AS "contactEmail",
-              contact_phone   AS "contactPhone"
+        cur.execute("""
+            SELECT id,title,description,requirements,"expirationDate","userId",
+                   source,label,contact_email AS "contactEmail",
+                   contact_phone AS "contactPhone"
             FROM public."Job"
             ORDER BY id DESC;
-            """
-        )
-        cols   = [d[0] for d in cur.description]
-        now    = datetime.now(timezone.utc)
+        """)
+        cols = [d[0] for d in cur.description]
+        now  = datetime.now(timezone.utc)
         offers = []
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
@@ -152,16 +136,16 @@ def get_admin_offers(request: Request):
             else:
                 expired = False
 
-            is_admin_offer = admin_id is not None and offer["userId"] == admin_id
+            is_admin_offer = admin_id and offer["userId"] == admin_id
             if expired:
                 if is_admin_offer and not show_admin_exp:
                     continue
                 if not is_admin_offer and not show_employer_exp:
                     continue
-
             offers.append(offer)
 
         return {"offers": offers}
+
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error al obtener ofertas: {e}")
