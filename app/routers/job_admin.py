@@ -16,11 +16,11 @@ SECRET_KEY    = os.getenv("SECRET_KEY", "")
 ALGORITHM     = os.getenv("ALGORITHM", "HS256")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
-def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
-    """
-    Valida y retorna el 'sub' del token admin, o lanza 401.
-    """
+from fastapi import Header
+
+def get_current_admin(authorization: str = Header(...)) -> str:
     try:
+        token = authorization.replace("Bearer ", "")
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         sub = payload.get("sub")
         if not sub:
@@ -28,7 +28,6 @@ def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
         return sub
     except JWTError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token admin inválido o expirado")
-
 
 # ───────────────────  DB  ───────────────────
 def get_db_connection():
