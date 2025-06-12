@@ -81,16 +81,13 @@ router = APIRouter(
 # GET /api/job/admin_offers
 # (REQUIERE ADMIN TOKEN)
 # ════════════════════════════════════════
-@router.get(
-    "/admin_offers",
-    dependencies=[Depends(get_current_admin)],
-    status_code=status.HTTP_200_OK,
-)
+@router.get("/admin_offers", status_code=status.HTTP_200_OK)
 def get_admin_offers(request: Request):
     """
     Devuelve todas las ofertas, filtrando expiradas según configuración.
     Requiere token admin.
     """
+    # Extraer y decodificar token manualmente
     auth = request.headers.get("authorization")
     if not auth or not auth.startswith("Bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token requerido")
@@ -108,7 +105,7 @@ def get_admin_offers(request: Request):
     show_admin_exp    = cfg.get("show_expired_admin_offers", False)
     show_employer_exp = cfg.get("show_expired_employer_offers", False)
 
-    # ✅ Asegurarse de que admin_sub puede ser ID o email
+    # ✅ Obtener ID desde sub (puede ser email o número)
     if sub.isdigit():
         admin_id = int(sub)
     else:
@@ -117,7 +114,7 @@ def get_admin_offers(request: Request):
     conn = cur = None
     try:
         conn = get_db_connection()
-        cur  = conn.cursor()
+        cur = conn.cursor()
         cur.execute(
             """
             SELECT
@@ -129,14 +126,14 @@ def get_admin_offers(request: Request):
               "userId",
               source,
               label,
-              contact_email   AS "contactEmail",
-              contact_phone   AS "contactPhone"
+              contact_email AS "contactEmail",
+              contact_phone AS "contactPhone"
             FROM public."Job"
             ORDER BY id DESC;
             """
         )
-        cols   = [d[0] for d in cur.description]
-        now    = datetime.now(timezone.utc)
+        cols = [d[0] for d in cur.description]
+        now = datetime.now(timezone.utc)
         offers = []
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
@@ -159,13 +156,13 @@ def get_admin_offers(request: Request):
             offers.append(offer)
 
         return {"offers": offers}
+
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error al obtener ofertas: {e}")
     finally:
-        if cur:  cur.close()
+        if cur: cur.close()
         if conn: conn.close()
-
 
 # ════════════════════════════════════════
 # PUT /api/job/update-admin
