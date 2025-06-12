@@ -83,11 +83,23 @@ router = APIRouter(
 # (REQUIERE ADMIN TOKEN)
 # ════════════════════════════════════════
 
-# GET /api/job/admin_offers (sin Depends, token leído manualmente)
-@router.get("/admin_offers", status_code=status.HTTP_200_OK)
+# ════════════════════════════════════════
+# GET /api/job/admin_offers  (alias: /api/job/admin/offers)
+# ════════════════════════════════════════
+@router.get(
+    "/admin_offers",
+    status_code=status.HTTP_200_OK,
+    name="admin_offers",
+)
+@router.get(
+    "/admin/offers",                 # ← alias para evitar 404 del front
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,         # no duplica en la doc /docs
+)
 def get_admin_offers(request: Request):
     """
-    Devuelve todas las ofertas. Requiere token admin (Authorization: Bearer …)
+    Devuelve todas las ofertas.  
+    Requiere cabecera **Authorization: Bearer &lt;token_admin&gt;**
     """
     # ── Token ───────────────────────────────────────────
     auth = request.headers.get("authorization")
@@ -135,6 +147,7 @@ def get_admin_offers(request: Request):
         offers = []
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
+            # serializar y filtrar expiradas
             exp = offer["expirationDate"]
             if exp:
                 if exp.tzinfo is None:
@@ -157,7 +170,10 @@ def get_admin_offers(request: Request):
 
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error al obtener ofertas: {e}")
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"Error al obtener ofertas: {e}",
+        )
     finally:
         if cur:
             cur.close()
