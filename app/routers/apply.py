@@ -6,8 +6,8 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from app.database import get_db_connection
-from app.routers.auth import create_access_token
-from app.routers.proposal import deliver            # ← función que envía el mail
+from app.routers.auth     import create_access_token
+from app.routers.proposal import deliver          # función que envía el mail
 
 router = APIRouter(prefix="/api/job", tags=["apply"])
 
@@ -15,18 +15,18 @@ router = APIRouter(prefix="/api/job", tags=["apply"])
 @router.get("/apply/{token}", summary="Confirmar postulación")
 def apply_with_token(token: str, bg: BackgroundTasks):
     """
-    1) Verifica el token (match.status = 'sent' sin applied_at).
-    2) Inserta la proposal si no existía (pending ó waiting).
-    3) Marca el matching como applied y el token como usado.
-    4) Si la proposal queda en waiting, agenda deliver(pid) en 5 min.
-    5) Devuelve { success, token } con JWT del usuario.
+    1) Valida el token (match.status='sent' y sin applied_at).
+    2) Crea la proposal si no existe   → pending ó waiting.
+    3) Pasa el matching a applied y marca el token como usado.
+    4) Si quedó en waiting agenda deliver(pid) en 5 min.
+    5) Devuelve { success, token } con JWT para el front.
     """
     conn = cur = None
     try:
         conn = get_db_connection()
         cur  = conn.cursor()
 
-        # 1) Match válido ------------------------------------------------------
+        # ── 1) Match válido ─────────────────────────────────────────
         cur.execute(
             """
             SELECT id, job_id, user_id
@@ -40,28 +40,39 @@ def apply_with_token(token: str, bg: BackgroundTasks):
         row = cur.fetchone()
         if not row:
             return JSONResponse(404, {"detail": "Token inválido o expirado"})
+
         match_id, job_id, user_id = row
 
-        # 2) Info del Job ------------------------------------------------------
-        cur.execute('SELECT COALESCE(label, \'manual\') FROM "Job" WHERE id=%s',
-                    (job_id,))
+        # ── 2) Datos del Job ────────────────────────────────────────
+        cur.execute(
+            'SELECT COALESCE(label, \'manual\') FROM "Job" WHERE id = %s',
+            (job_id,),
+        )
         job_label = cur.fetchone()[0]
         proposal_status = "pending" if job_label == "manual" else "waiting"
 
-        # 3) Crear proposal (idempotente) --------------------------------------
+        # ── 3) Insertar proposal (idempotente) ──────────────────────
         cur.execute(
             """
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
             VALUES (%s, %s, %s, %s, NOW())
-            ON CONFLICT (job_id, applicant_id) DO NOTHING
+            ON CONFLICT DO NOTHING          -- sin columnas → nunca falla
             RETURNING id
             """,
             (job_id, user_id, job_label, proposal_status),
         )
-        pid_row = cur.fetchone()
-        pid = pid_row[0] if pid_row else None
+        row = cur.fetchone()
+        if row:
+            pid = row[0]
+        else:
+            # Ya existía; la buscamos
+            cur.execute(
+                "SELECT id FROM proposals WHERE job_id=%s AND applicant_id=%s",
+                (job_id, user_id),
+            )
+            pid = cur.fetchone()[0]
 
-        # 4) Match -> applied ---------------------------------------------------
+        # ── 4) Actualizar match ─────────────────────────────────────
         cur.execute(
             """
             UPDATE matches
@@ -73,7 +84,7 @@ def apply_with_token(token: str, bg: BackgroundTasks):
             (match_id,),
         )
 
-        # 5) Token usado --------------------------------------------------------
+        # ── 5) Marcar token como usado ─────────────────────────────
         cur.execute(
             """
             UPDATE apply_tokens
@@ -86,12 +97,11 @@ def apply_with_token(token: str, bg: BackgroundTasks):
 
         conn.commit()
 
-        # 6) Si quedó en waiting, programar envío ------------------------------
-        if proposal_status == "waiting" and pid:
-            # deliver() ya duerme AUTO_DELAY (5 min) antes de mandar el mail
-            bg.add_task(deliver, pid, True)
+        # ── 6) Si quedó en waiting, programar envío ────────────────
+        if proposal_status == "waiting":
+            bg.add_task(deliver, pid, True)  # deliver duerme 5 minutos
 
-        # 7) JWT para el frontend ----------------------------------------------
+        # ── 7) JWT para el usuario ─────────────────────────────────
         jwt_token = create_access_token({"sub": str(user_id)})
         return {"success": True, "token": jwt_token}
 
