@@ -1,5 +1,4 @@
 # app/routers/apply.py
-
 from datetime import datetime
 import traceback
 
@@ -16,17 +15,19 @@ router = APIRouter(prefix="/api/job", tags=["apply"])
 def apply_with_token(token: str):
     """
     1) Verifica el token (matching.status='sent' & applied_at IS NULL).
-    2) Inserta la proposal si no existía.
-    3) Marca el matching como applied.
+    2) Inserta la proposal si no existía:
+       • label  = label del Job        (fallback 'manual')
+       • status = 'pending'  si label='manual'
+                  'waiting'  en cualquier otro caso
+    3) Marca el matching como 'applied'.
     4) Devuelve { success, token=<jwt usuario> }.
-       (El trigger en BD se encarga de applicants y last_application).
     """
     conn = cur = None
     try:
         conn = get_db_connection()
         cur  = conn.cursor()
 
-        # 1) Matching válido
+        # ── 1) Matching válido ─────────────────────────────────────────
         cur.execute(
             """
             SELECT id, job_id, user_id
@@ -41,35 +42,42 @@ def apply_with_token(token: str):
         if not row:
             return JSONResponse(
                 status_code=404,
-                content={"detail": "Token inválido o expirado"}
+                content={"detail": "Token inválido o expirado"},
             )
         match_id, job_id, user_id = row
 
-        # 2) Crear proposal (si no existe aún)
+        # ── 2) Datos del Job (label) ───────────────────────────────────
+        cur.execute('SELECT COALESCE(label, \'manual\') FROM "Job" WHERE id = %s', (job_id,))
+        job_label = cur.fetchone()[0]            # p.ej. manual / automatic / instagram
+
+        proposal_status = "pending" if job_label == "manual" else "waiting"
+
+        # ── 3) Crear proposal (si no existe) ───────────────────────────
         cur.execute(
             """
-            INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-            SELECT
-              %s AS job_id,
-              %s AS applicant_id,
-              COALESCE((SELECT label FROM "Job" WHERE id = %s), 'manual') AS label,
-              'pending' AS status,
-              NOW() AS created_at
+            INSERT INTO proposals
+                  (job_id, applicant_id, label,  status,           created_at)
+            SELECT %s,     %s,           %s,     %s,               NOW()
             WHERE NOT EXISTS (
-              SELECT 1
-                FROM proposals
+              SELECT 1 FROM proposals
                WHERE job_id = %s AND applicant_id = %s
             )
             """,
-            (job_id, user_id, job_id, job_id, user_id),
+            (
+                job_id,
+                user_id,
+                job_label,
+                proposal_status,
+                job_id,
+                user_id,
+            ),
         )
 
-        # 3) Marcar matching como applied
+        # ── 4) Matching → applied ─────────────────────────────────────
         cur.execute(
             """
             UPDATE matches
-               SET status     = 'applied',
-                   applied_at = NOW()
+               SET status='applied', applied_at = NOW()
              WHERE id = %s
             """,
             (match_id,),
@@ -77,7 +85,7 @@ def apply_with_token(token: str):
 
         conn.commit()
 
-        # 4) Generar JWT del usuario
+        # ── 5) JWT para el usuario ────────────────────────────────────
         jwt_token = create_access_token({"sub": str(user_id)})
         return {"success": True, "token": jwt_token}
 
