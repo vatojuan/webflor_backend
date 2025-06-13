@@ -5,32 +5,34 @@ from typing import Dict, Optional
 
 import psycopg2
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Header
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
-from fastapi import APIRouter, HTTPException, Request, status
 
 load_dotenv()
 
-# ───────────────────  JWT  ───────────────────
+# ─────────────────── JWT ───────────────────
 SECRET_KEY    = os.getenv("SECRET_KEY", "")
 ALGORITHM     = os.getenv("ALGORITHM", "HS256")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
 
-from fastapi import Header
-
 def get_current_admin(authorization: str = Header(...)) -> str:
+    """
+    Valida el header Authorization: Bearer <token> y retorna el sub.
+    """
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Falta token admin")
+    token = authorization[len("Bearer "):]
     try:
-        token = authorization.replace("Bearer ", "")
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        sub = payload.get("sub")
+        sub = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]).get("sub")
         if not sub:
             raise JWTError()
         return sub
     except JWTError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token admin inválido o expirado")
 
-# ───────────────────  DB  ───────────────────
+
+# ─────────────────── DB ───────────────────
 def get_db_connection():
     try:
         return psycopg2.connect(
@@ -71,58 +73,35 @@ def get_admin_id(email: str) -> Optional[int]:
         if conn: conn.close()
 
 
-# ───────────────────  Router  ───────────────────
-router = APIRouter(
-    prefix="/api/job",
-    tags=["job_admin"],
-)
+# ─────────────────── Router ───────────────────
+router = APIRouter(prefix="/api/job", tags=["job_admin"])
 
 
-# ════════════════════════════════════════
-# GET /api/job/admin_offers
-# (REQUIERE ADMIN TOKEN)
-# ════════════════════════════════════════
-
-# ════════════════════════════════════════
-# GET /api/job/admin_offers  (alias: /api/job/admin/offers)
-# ════════════════════════════════════════
+# ═════════════════ GET /api/job/admin_offers & /api/job/admin/offers ═════════════════
 @router.get(
     "/admin_offers",
+    dependencies=[Depends(get_current_admin)],
     status_code=status.HTTP_200_OK,
     name="admin_offers",
 )
 @router.get(
-    "/admin/offers",                 # ← alias para evitar 404 del front
+    "/admin/offers",
+    dependencies=[Depends(get_current_admin)],
     status_code=status.HTTP_200_OK,
-    include_in_schema=False,         # no duplica en la doc /docs
+    include_in_schema=False,
 )
-def get_admin_offers(request: Request):
+def get_admin_offers(request: Request, admin_sub: str = Depends(get_current_admin)):
     """
     Devuelve todas las ofertas.  
-    Requiere cabecera **Authorization: Bearer &lt;token_admin&gt;**
+    Requiere token admin válido.
     """
-    # ── Token ───────────────────────────────────────────
-    auth = request.headers.get("authorization")
-    if not auth or not auth.startswith("Bearer "):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Falta token admin")
-
-    token = auth[7:]  # quita 'Bearer '
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        admin_sub = payload.get("sub")
-        if not admin_sub:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido")
-    except JWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido o expirado")
-
-    # ── Identificar admin_id ────────────────────────────
+    # identificar admin_id
     admin_id = int(admin_sub) if admin_sub.isdigit() else get_admin_id(admin_sub)
 
     cfg               = get_admin_config()
     show_admin_exp    = cfg.get("show_expired_admin_offers", False)
     show_employer_exp = cfg.get("show_expired_employer_offers", False)
 
-    # ── Query BD ────────────────────────────────────────
     conn = cur = None
     try:
         conn = get_db_connection()
@@ -145,9 +124,9 @@ def get_admin_offers(request: Request):
         cols   = [d[0] for d in cur.description]
         now    = datetime.now(timezone.utc)
         offers = []
+
         for row in cur.fetchall():
             offer = dict(zip(cols, row))
-            # serializar y filtrar expiradas
             exp = offer["expirationDate"]
             if exp:
                 if exp.tzinfo is None:
@@ -157,7 +136,7 @@ def get_admin_offers(request: Request):
             else:
                 expired = False
 
-            is_admin_offer = admin_id is not None and offer["userId"] == admin_id
+            is_admin_offer = offer["userId"] == admin_id
             if expired:
                 if is_admin_offer and not show_admin_exp:
                     continue
@@ -175,15 +154,11 @@ def get_admin_offers(request: Request):
             f"Error al obtener ofertas: {e}",
         )
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur:  cur.close()
+        if conn: conn.close()
 
-# ════════════════════════════════════════
-# PUT /api/job/update-admin
-# (REQUIERE ADMIN TOKEN)
-# ════════════════════════════════════════
+
+# ═════════════════ PUT /api/job/update-admin ═════════════════
 @router.put(
     "/update-admin",
     dependencies=[Depends(get_current_admin)],
@@ -214,7 +189,7 @@ async def update_admin_offer(request: Request):
         except ValueError:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Formato de fecha inválido")
 
-    # Generar embedding con OpenAI (opcional)
+    # Generar embedding con OpenAI
     from openai import OpenAI
     client    = OpenAI(api_key=os.getenv("OPENAI_API_KEY",""))
     embedding = client.embeddings.create(
@@ -226,8 +201,7 @@ async def update_admin_offer(request: Request):
     try:
         conn = get_db_connection()
         cur  = conn.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             UPDATE public."Job"
                SET title            = %s,
                    description      = %s,
@@ -251,14 +225,12 @@ async def update_admin_offer(request: Request):
                    label,
                    contact_email   AS "contactEmail",
                    contact_phone   AS "contactPhone";
-            """,
-            (
-                title, description, requirements, exp_date,
-                user_id, source, label,
-                contact_email, contact_phone,
-                embedding, job_id,
-            ),
-        )
+        """, (
+            title, description, requirements, exp_date,
+            user_id, source, label,
+            contact_email, contact_phone,
+            embedding, job_id,
+        ))
         upd = cur.fetchone()
         if not upd:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Oferta no encontrada")
@@ -280,14 +252,11 @@ async def update_admin_offer(request: Request):
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error interno al actualizar: {e}")
     finally:
-        if cur:  cur.close()
+        if cur: cur.close()
         if conn: conn.close()
 
 
-# ════════════════════════════════════════
-# DELETE /api/job/delete-admin
-# (REQUIERE ADMIN TOKEN)
-# ════════════════════════════════════════
+# ═════════════════ DELETE /api/job/delete-admin ═════════════════
 @router.delete(
     "/delete-admin",
     dependencies=[Depends(get_current_admin)],
@@ -305,23 +274,19 @@ async def delete_admin_offer(request: Request):
         cur  = conn.cursor()
 
         # 1) cancelar propuestas activas
-        cur.execute(
-            """
+        cur.execute("""
             UPDATE proposals
                SET status='cancelled',
                    cancelled_at = NOW()
              WHERE job_id = %s
                AND status IN ('waiting','pending');
-            """,
-            (job_id,),
-        )
+        """, (job_id,))
+
         # 2) eliminar todas las propuestas asociadas
         cur.execute("DELETE FROM proposals WHERE job_id = %s;", (job_id,))
+
         # 3) borrar la oferta
-        cur.execute(
-            'DELETE FROM public."Job" WHERE id = %s RETURNING id;',
-            (job_id,),
-        )
+        cur.execute('DELETE FROM public."Job" WHERE id = %s RETURNING id;', (job_id,))
         if not cur.fetchone():
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Oferta no encontrada")
 
@@ -336,5 +301,5 @@ async def delete_admin_offer(request: Request):
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error al eliminar oferta: {e}")
     finally:
-        if cur:  cur.close()
+        if cur: cur.close()
         if conn: conn.close()
