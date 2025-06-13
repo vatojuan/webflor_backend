@@ -1,19 +1,20 @@
 # app/routers/apply.py
-from fastapi import APIRouter, HTTPException
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from datetime import datetime
 from app.database import get_db_connection
 from app.routers.auth import create_access_token
-import traceback, os
+import traceback
 
 router = APIRouter(tags=["apply"])
 
 @router.get("/apply/{token}", summary="Confirmar postulación")
-def apply_with_token(token: str):
+def apply_with_token(request: Request, token: str):
     """
-    1. Comprueba que el token pertenezca a un matching con status **sent**
-       y aún no se haya aplicado.
+    1. Comprueba que el token pertenezca a un matching con status sent y aún no aplicado.
     2. Crea (si no existe) la propuesta para ese user-job.
-    3. Marca el matching como *applied*.
+    3. Marca el matching como applied.
     4. Incrementa el contador de postulantes en la oferta.
     5. Devuelve JSON { success, token } con un JWT del usuario.
     """
@@ -23,19 +24,25 @@ def apply_with_token(token: str):
         cur  = conn.cursor()
 
         # ── 1) Matching vigente ─────────────────────────────────────────
+        print(f"🔎 Buscando token exacto: '{token}'")
         cur.execute(
             """
             SELECT m.id, m.job_id, m.user_id
-            FROM matches m
-            WHERE trim(m.apply_token) = trim(%s)           -- quita tabs, \n, espacios
-            AND m.status       = 'sent'
-            AND m.applied_at IS NULL
+              FROM matches m
+             WHERE trim(m.apply_token) = trim(%s)
+               AND m.status = 'sent'
+               AND m.applied_at IS NULL
             """,
             (token,),
         )
         row = cur.fetchone()
         if not row:
-            raise HTTPException(status_code=400, detail="Token inválido o expirado")
+            print(f"❌ No se encontró token válido: {token}")
+            conn.rollback()
+            return JSONResponse(
+                status_code=404,
+                content={"detail": "Token inválido o expirado"}
+            )
 
         match_id, job_id, user_id = row
 
@@ -43,20 +50,17 @@ def apply_with_token(token: str):
         cur.execute(
             """
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-            SELECT  %s,
-                    %s,
-                    COALESCE((SELECT label FROM "Job" WHERE id = %s), 'manual'),
-                    'pending',
-                    NOW()
+            SELECT %s, %s,
+                   COALESCE((SELECT label FROM "Job" WHERE id = %s), 'manual'),
+                   'pending',
+                   NOW()
             WHERE NOT EXISTS (
-                SELECT 1
-                  FROM proposals
-                 WHERE job_id = %s AND applicant_id = %s
-            )
+              SELECT 1 FROM proposals
+               WHERE job_id = %s AND applicant_id = %s
+            );
             """,
             (job_id, user_id, job_id, job_id, user_id),
         )
-        # No nos importa el id devuelto; evitamos duplicado con el WHERE-NOT-EXISTS
 
         # ── 3) Marcar matching como aplicado ────────────────────────────
         cur.execute(
@@ -64,7 +68,7 @@ def apply_with_token(token: str):
             UPDATE matches
                SET applied_at = NOW(),
                    status     = 'applied'
-             WHERE id = %s
+             WHERE id = %s;
             """,
             (match_id,),
         )
@@ -75,7 +79,7 @@ def apply_with_token(token: str):
             UPDATE "Job"
                SET applicants = COALESCE(applicants, 0) + 1,
                    last_application = %s
-             WHERE id = %s
+             WHERE id = %s;
             """,
             (datetime.utcnow(), job_id),
         )
