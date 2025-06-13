@@ -52,9 +52,9 @@ app = FastAPI(
 )
 
 # ─────────────────── CORS ───────────────────
-origins = os.getenv("FRONTEND_ORIGINS", "").split(",") or ["*"]
-if origins == [""]:
-    origins = ["*"]
+origins = os.getenv("FRONTEND_ORIGINS", "").split(",")
+if not origins or origins == [""]:
+    origins = ["https://www.fapmendoza.com"]  # o ["*"] durante desarrollo
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,7 +64,7 @@ app.add_middleware(
     allow_headers     = ["*"],
 )
 
-# ───────────── Logging mínimo ─────────────
+# ─────── Logging mínimo ───────
 @app.middleware("http")
 async def log_request(request: Request, call_next):
     print("📥", request.method, request.url.path)
@@ -114,7 +114,13 @@ app.include_router(
 
 # ────── Job (público) y job-admin (protegido) ──────
 app.include_router(job.router)  # prefix="/api/job"
-app.include_router(job_admin.router, dependencies=[Depends(get_current_admin)])
+
+# parche: en job_admin.router está el endpoint my_applications corregido
+# asegurate de que la función QUERY usa j."createdAt" y no j.created_at
+app.include_router(
+    job_admin.router,
+    dependencies=[Depends(get_current_admin)]
+)
 
 # ────── Otros protegidos ──────
 app.include_router(admin_users.router, tags=["admin_users"])
