@@ -12,7 +12,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 
 from app.database import get_db_connection
-from app.routers.proposal import send_mail  # sólo email aquí
+from app.routers.proposal import send_mail
 
 # ─────────────────── Configuración & autenticación ───────────────────
 SECRET_KEY   = os.getenv("SECRET_KEY", "")
@@ -29,24 +29,23 @@ def get_current_admin(token: str = Depends(oauth2_admin)) -> str:
     except JWTError:
         raise HTTPException(401, "Token admin inválido o requerido")
 
-
 # ─────────────────── Helpers internos ───────────────────
 
 def _cur_to_dicts(cur) -> List[Dict[str, Any]]:
     cols = [c[0] for c in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
-
 def _get_default_tpl(cur, tpl_type: str) -> Dict[str, str]:
-    cur.execute("""
+    cur.execute(
+        """
         SELECT subject, body
           FROM proposal_templates
          WHERE type = %s AND is_default = TRUE
          LIMIT 1
-    """, (tpl_type,))
+        """, (tpl_type,)
+    )
     row = cur.fetchone()
     return {"subject": row[0], "body": row[1]} if row else {"subject": "", "body": ""}
-
 
 def _apply_tpl(tpl: Dict[str, str], ctx: Dict[str, str]) -> Dict[str, str]:
     subj, body = tpl.get("subject", ""), tpl.get("body", "")
@@ -54,7 +53,6 @@ def _apply_tpl(tpl: Dict[str, str], ctx: Dict[str, str]) -> Dict[str, str]:
         subj = subj.replace(f"{{{{{k}}}}}", v)
         body = body.replace(f"{{{{{k}}}}}", v)
     return {"subject": subj or "(sin asunto)", "body": body}
-
 
 # ═══════════ Matching batch (oferta nueva) ═══════════
 
@@ -80,57 +78,56 @@ def run_matching_for_job(job_id: int) -> None:
         cur.execute("DELETE FROM matches WHERE job_id = %s", (job_id,))
         conn.commit()
 
-        # 3) Insertar todos los nuevos con status 'pending'
+        # 3) Insertar nuevos pendientes
         logger.info(f"run_matching_for_job: insertando matchings pendientes para oferta {job_id}")
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO matches (job_id, user_id, score, status)
             SELECT %s, u.id,
                    (1.0 - (u.embedding::vector <=> %s::vector)),
                    'pending'
               FROM "User" u
              WHERE u.embedding IS NOT NULL
-        """, (job_id, emb))
+            """, (job_id, emb)
+        )
         conn.commit()
         logger.info(f"run_matching_for_job: insertados {cur.rowcount} matchings pendientes")
 
-        # 4) Traer todos y filtrar en Python
-        logger.info(f"run_matching_for_job: consultando todos los matchings para oferta {job_id}")
-        cur.execute("""
-            SELECT m.id, m.score,
+        # 4) Consultar y enviar
+        tpl = _get_default_tpl(cur, "empleado")
+        cur.execute(
+            """
+            SELECT m.id, m.user_id, m.score,
                    u.name, u.email, u."cvUrl",
                    j.title
               FROM matches m
-              JOIN "User" u ON u.id   = m.user_id
-              JOIN "Job"  j ON j.id   = m.job_id
+              JOIN "User" u ON u.id = m.user_id
+              JOIN "Job"  j ON j.id = m.job_id
              WHERE m.job_id = %s
-        """, (job_id,))
-        all_matches = cur.fetchall()
-        tpl = _get_default_tpl(cur, "empleado")
-        logger.info(f"run_matching_for_job: obtenidos {len(all_matches)} matchings, filtrando ≥ 0.80")
-
-        for mid, score, name, email, cv, title in all_matches:
+            """, (job_id,)
+        )
+        for mid, u_id, score, name, email, cv, title in cur.fetchall():
             sc = float(score)
-            if sc < 0.80:
-                logger.debug(f"skip match {mid} score={sc:.2f} < 0.80")
+            if sc < 0.8 or not email:
                 continue
-            if not email:
-                logger.warning(f"match {mid} sin email; se omite")
-                continue
-
-            logger.info(f"📤 Enviando match {mid} → {email} (score={sc:.2f})")
-
-            # Generar enlace seguro
             token      = secrets.token_urlsafe(32)
             apply_link = f"{FRONTEND_URL}/apply/{token}"
 
-            # Guardar token y marcar 'sent'
+            # Guardar token y cambiar estado
             cur.execute(
-                "UPDATE matches SET apply_token = %s, status='sent', sent_at=NOW() WHERE id = %s",
+                "UPDATE matches SET apply_token=%s, status='sent', sent_at=NOW() WHERE id=%s",
                 (token, mid),
+            )
+            # Registrar token centralizado
+            cur.execute(
+                """
+                INSERT INTO apply_tokens (token, job_id, applicant_id, expires_at, used)
+                VALUES (%s, %s, %s, NOW() + INTERVAL '30 days', FALSE)
+                ON CONFLICT(token) DO NOTHING
+                """, (token, job_id, u_id)
             )
             conn.commit()
 
-            # Preparar contexto y enviar correo
             ctx = {
                 "applicant_name": name,
                 "job_title":      title,
@@ -142,11 +139,11 @@ def run_matching_for_job(job_id: int) -> None:
             msg = _apply_tpl(tpl, ctx)
             try:
                 send_mail(email, msg["subject"], msg["body"], cv)
-                logger.info(f"✅ Email enviado exitosamente a {email}")
+                logger.info(f"✅ Email enviado a {email}")
             except Exception as e:
                 logger.exception(f"❌ Error enviando match {mid} a {email}")
                 cur.execute(
-                    "UPDATE matches SET status='error', error_msg=%s WHERE id = %s",
+                    "UPDATE matches SET status='error', error_msg=%s WHERE id=%s",
                     (str(e)[:250], mid),
                 )
                 conn.commit()
@@ -156,54 +153,10 @@ def run_matching_for_job(job_id: int) -> None:
             conn.rollback()
         logger.exception("run_matching_for_job error inesperado")
     finally:
-        if cur:  cur.close()
+        if cur: cur.close()
         if conn: conn.close()
 
-
-# ═══════════ Matching batch (usuario nuevo) ═══════════
-
-def run_matching_for_user(user_id: int) -> None:
-    conn = cur = None
-    try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-
-        logger.info(f"run_matching_for_user: borrando previos para usuario {user_id}")
-        cur.execute("DELETE FROM matches WHERE user_id = %s", (user_id,))
-        conn.commit()
-
-        cur.execute(
-            'SELECT embedding FROM "User" WHERE id = %s AND embedding IS NOT NULL',
-            (user_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            logger.info(f"run_matching_for_user: usuario {user_id} sin embedding, se omite.")
-            return
-        emb = row[0]
-
-        logger.info(f"run_matching_for_user: insertando matchings pendientes para usuario {user_id}")
-        cur.execute("""
-            INSERT INTO matches (job_id, user_id, score, status)
-            SELECT j.id, %s,
-                   (1.0 - (j.embedding::vector <=> %s::vector)),
-                   'pending'
-              FROM "Job" j
-             WHERE j.embedding IS NOT NULL
-        """, (user_id, emb))
-        conn.commit()
-        logger.info(f"run_matching_for_user: insertados {cur.rowcount} matchings pendientes")
-
-    except Exception:
-        if conn:
-            conn.rollback()
-        logger.exception("run_matching_for_user error inesperado")
-    finally:
-        if cur:  cur.close()
-        if conn: conn.close()
-
-
-# ═══════════ Panel admin, reenviar y previews ═══════════
+# ═══════════ Panel admin y reenvío ═══════════
 
 @router.get(
     "/admin",
@@ -215,7 +168,8 @@ def list_matchings():
     try:
         conn = get_db_connection()
         cur  = conn.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             SELECT m.id, m.score, m.sent_at, m.status,
                    json_build_object('id', j.id, 'title', j.title) AS job,
                    json_build_object('id', u.id, 'email', u.email)   AS user
@@ -224,12 +178,12 @@ def list_matchings():
               JOIN "User" u ON u.id = m.user_id
              WHERE (m.score)::float >= %s
              ORDER BY m.sent_at DESC NULLS FIRST, m.id DESC
-        """, (0.80,))
+            """, (0.8,)
+        )
         return _cur_to_dicts(cur)
     finally:
-        if cur:  cur.close()
+        if cur: cur.close()
         if conn: conn.close()
-
 
 @router.post(
     "/resend/{mid}",
@@ -241,32 +195,41 @@ def resend_matching(mid: int):
     try:
         conn = get_db_connection()
         cur  = conn.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             SELECT m.score, m.apply_token,
                    u.name AS cand_name, u.email AS cand_email, u."cvUrl" AS cand_cv,
-                   j.title     AS job_title
+                   j.title AS job_title, m.user_id
               FROM matches m
               JOIN "User" u ON u.id = m.user_id
               JOIN "Job"  j ON j.id = m.job_id
              WHERE m.id = %s
-        """, (mid,))
+            """, (mid,)
+        )
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "Matching no encontrado")
-
-        score, token, name, email, cv, job_title = row
+        score, token, name, email, cv, job_title, u_id = row
         if not email:
             raise HTTPException(400, "Candidato sin email")
 
+        # Asegurar token existente
+        cur.execute(
+            "INSERT INTO apply_tokens (token, job_id, applicant_id, expires_at, used)"
+            " SELECT %s, m.job_id, m.user_id, NOW() + INTERVAL '30 days', FALSE"
+            " FROM matches m WHERE m.id = %s"
+            " ON CONFLICT(token) DO NOTHING", (token, mid)
+        )
+        conn.commit()
+
         tpl  = _get_default_tpl(cur, "empleado")
         link = f"{FRONTEND_URL}/apply/{token}"
-        ctx  = {
-            "applicant_name": name,
-            "job_title":      job_title,
-            "cv_url":         cv or "",
-            "score":          f"{round(float(score)*100,1)}%",
-            "apply_link":     link,
-            "created_at":     "",
+        ctx  = {"applicant_name": name,
+                "job_title":      job_title,
+                "cv_url":         cv or "",
+                "score":          f"{round(float(score)*100,1)}%",
+                "apply_link":     link,
+                "created_at":     "",
         }
         msg = _apply_tpl(tpl, ctx)
 
@@ -274,7 +237,6 @@ def resend_matching(mid: int):
         cur.execute("UPDATE matches SET sent_at=NOW(), status='resent' WHERE id=%s", (mid,))
         conn.commit()
         return {"message": "reenviado"}
-
     except HTTPException:
         raise
     except Exception:
@@ -282,63 +244,5 @@ def resend_matching(mid: int):
         logger.exception("resend_matching error inesperado")
         raise HTTPException(500, "Error interno")
     finally:
-        if cur:  cur.close()
-        if conn: conn.close()
-
-
-@router.get("/job/{job_id}/match", summary="Preview usuarios para un Job")
-def match_for_job(job_id: int):
-    conn = cur = None
-    try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-        cur.execute(
-            'SELECT embedding FROM "Job" WHERE id = %s AND embedding IS NOT NULL',
-            (job_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(404, "Oferta sin embedding")
-        emb = row[0]
-
-        cur.execute("""
-            SELECT u.id, u.email,
-                   (1.0 - (u.embedding::vector <=> %s::vector)) AS score
-              FROM "User" u
-             WHERE u.embedding IS NOT NULL
-             ORDER BY score DESC
-             LIMIT 100
-        """, (emb,))
-        return {"matches": [{"userId": r[0], "email": r[1], "score": float(r[2])} for r in cur.fetchall()]}
-    finally:
-        if cur:  cur.close()
-        if conn: conn.close()
-
-
-@router.get("/user/{user_id}/match", summary="Preview ofertas para un Usuario")
-def match_for_user(user_id: int):
-    conn = cur = None
-    try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-        cur.execute(
-            'SELECT embedding FROM "User" WHERE id = %s AND embedding IS NOT NULL',
-            (user_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(404, "Usuario sin embedding")
-        emb = row[0]
-
-        cur.execute("""
-            SELECT j.id, j.title,
-                   (1.0 - (j.embedding::vector <=> %s::vector)) AS score
-              FROM "Job" j
-             WHERE j.embedding IS NOT NULL
-             ORDER BY score DESC
-             LIMIT 100
-        """, (emb,))
-        return {"matches": [{"jobId": r[0], "title": r[1], "score": float(r[2])} for r in cur.fetchall()]}
-    finally:
-        if cur:  cur.close()
+        if cur: cur.close()
         if conn: conn.close()
