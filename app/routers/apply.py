@@ -1,6 +1,4 @@
 # app/routers/apply.py
-from __future__ import annotations
-
 from datetime import datetime
 import traceback
 
@@ -16,85 +14,83 @@ router = APIRouter(prefix="/api/job", tags=["apply"])
 @router.get("/apply/{token}", summary="Confirmar postulación")
 def apply_with_token(token: str):
     """
-    Flujo de confirmación de postulación desde el enlace del e-mail.
-
-    1. Verifica el token en apply_tokens (vigente y sin usar).
-    2. Inserta la proposal si todavía no existe:
-       • label  = label del Job (fallback 'manual')
-       • status = 'pending'  si label == 'manual'
-                  'waiting'  para el resto
-    3. Marca el token como usado y el matching como 'applied'.
-    4. Devuelve { success: true, token: <JWT empleado> }.
+    1) Verifica el token en matches con status='sent'.
+    2) Inserta proposal si no existe (status según label del Job).
+    3) Marca matching como 'applied'.
+    4) Marca apply_token como usado.
+    5) Devuelve { success, token }.
     """
     conn = cur = None
     try:
         conn = get_db_connection()
         cur  = conn.cursor()
 
-        # ── 1) Token válido en apply_tokens ───────────────────────────
+        # ── 1) Validar token en MATCHES ──────────────────────────────
         cur.execute(
             """
-            SELECT job_id,
-                   applicant_id,      -- user_id
-                   used,
-                   expires_at
-              FROM apply_tokens
-             WHERE token = %s
+            SELECT id, job_id, user_id
+              FROM matches
+             WHERE trim(apply_token) = trim(%s)
+               AND status = 'sent'
+               AND applied_at IS NULL
             """,
             (token,),
         )
         row = cur.fetchone()
         if not row:
-            return JSONResponse(404, {"detail": "Token inválido o inexistente"})
+            return JSONResponse(
+                status_code=404,
+                content={"detail": "Token inválido o expirado"},
+            )
+        match_id, job_id, user_id = row
 
-        job_id, user_id, used, expires_at = row
-        if used or expires_at < datetime.utcnow():
-            return JSONResponse(400, {"detail": "Token expirado o ya utilizado"})
-
-        # ── 2) Datos del Job  (para label) ────────────────────────────
-        cur.execute(
-            'SELECT COALESCE(label, \'manual\') FROM "Job" WHERE id = %s',
-            (job_id,),
-        )
-        job_label = cur.fetchone()[0]   # p.ej. manual / automatic / instagram
+        # ── 2) Obtener label del Job ─────────────────────────────────
+        cur.execute('SELECT COALESCE(label, \'manual\') FROM "Job" WHERE id = %s', (job_id,))
+        job_label = cur.fetchone()[0]
         proposal_status = "pending" if job_label == "manual" else "waiting"
 
-        # ── 3) Crear proposal (idempotente) ───────────────────────────
+        # ── 3) Crear proposal si no existía ──────────────────────────
         cur.execute(
             """
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-            VALUES (%s, %s, %s, %s, NOW())
-            ON CONFLICT (job_id, applicant_id) DO NOTHING
+            SELECT %s, %s, %s, %s, NOW()
+            WHERE NOT EXISTS (
+              SELECT 1 FROM proposals WHERE job_id = %s AND applicant_id = %s
+            )
             """,
-            (job_id, user_id, job_label, proposal_status),
+            (
+                job_id,
+                user_id,
+                job_label,
+                proposal_status,
+                job_id,
+                user_id,
+            ),
         )
 
-        # ── 4) Actualizar token y matching ────────────────────────────
-        cur.execute(
-            """
-            UPDATE apply_tokens
-               SET used     = TRUE,
-                   used_at  = NOW()
-             WHERE token = %s
-            """,
-            (token,),
-        )
-
+        # ── 4) Marcar matching como 'applied' ────────────────────────
         cur.execute(
             """
             UPDATE matches
-               SET status            = 'applied',
-                   apply_token_used  = TRUE,
-                   applied_at        = NOW()
-             WHERE job_id  = %s
-               AND user_id = %s
+               SET status = 'applied',
+                   apply_token_used = TRUE,
+                   applied_at = NOW()
+             WHERE id = %s
             """,
-            (job_id, user_id),
+            (match_id,),
         )
+
+        # ── 5) Marcar apply_token como usado ─────────────────────────
+        cur.execute("""
+            UPDATE apply_tokens
+               SET used = TRUE,
+                   used_at = NOW()
+             WHERE token = %s
+        """, (token,))
 
         conn.commit()
 
-        # ── 5) JWT para el frontend empleado ─────────────────────────
+        # ── 6) Devolver token JWT del usuario ───────────────────────
         jwt_token = create_access_token({"sub": str(user_id)})
         return {"success": True, "token": jwt_token}
 
