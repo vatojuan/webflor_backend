@@ -4,6 +4,7 @@ import os
 import secrets
 import logging
 import traceback
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -108,7 +109,7 @@ def run_matching_for_job(job_id: int) -> None:
             sc = float(score)
             if sc < 0.80 or not email:
                 continue
-            token      = secrets.token_urlsafe(32)
+            token = str(uuid.uuid4())
             apply_link = f"{FRONTEND_URL}/apply/{token}"
 
             # Guardar token en matches y centralizado
