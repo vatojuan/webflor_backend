@@ -52,9 +52,13 @@ app = FastAPI(
 )
 
 # ─────────────────── CORS ───────────────────
-origins = os.getenv("FRONTEND_ORIGINS", "").split(",")
-if not origins or origins == [""]:
-    origins = ["https://www.fapmendoza.com"]  # o ["*"] durante desarrollo
+# Leer FRONTEND_ORIGINS de .env como "https://www.fapmendoza.com,https://fapmendoza.online"
+origins_env = os.getenv("FRONTEND_ORIGINS", "")
+origins = [o.strip() for o in origins_env.split(",") if o.strip()]
+
+# Si no hay ninguno configurado, para desarrollo permitir todos
+if not origins:
+    origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -114,12 +118,9 @@ app.include_router(
 
 # ────── Job (público) y job-admin (protegido) ──────
 app.include_router(job.router)  # prefix="/api/job"
-
-# parche: en job_admin.router está el endpoint my_applications corregido
-# asegurate de que la función QUERY usa j."createdAt" y no j.created_at
 app.include_router(
     job_admin.router,
-    dependencies=[Depends(get_current_admin)]
+    dependencies=[Depends(get_current_admin)],
 )
 
 # ────── Otros protegidos ──────
