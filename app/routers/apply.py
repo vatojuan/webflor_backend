@@ -83,9 +83,8 @@ def apply_with_token(token: str):
         # ── 5) Marcar apply_token como usado ─────────────────────────
         cur.execute("""
             UPDATE apply_tokens
-               SET used = TRUE,
-                   used_at = NOW()
-             WHERE token = %s
+            SET used = TRUE
+            WHERE token = %s
         """, (token,))
 
         conn.commit()
