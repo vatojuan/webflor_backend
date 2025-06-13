@@ -200,18 +200,18 @@ async def my_applications(current_user=Depends(get_current_user)):
         cur.execute(
             """
             SELECT
-              p.id,
-              j.id            AS "jobId",
-              j.title         AS "jobTitle",
-              j.created_at    AS "jobPostedAt",
-              COUNT(p2.*)     FILTER (WHERE p2.status NOT IN ('cancelled','rejected')) AS "candidatesCount",
-              p.status,
-              p.created_at    AS "createdAt"
+            p.id,
+            j.id            AS "jobId",
+            j.title         AS "jobTitle",
+            COALESCE(j."createdAt", j.created_at) AS "jobPostedAt",
+            COUNT(*) FILTER (WHERE p2.status NOT IN ('cancelled','rejected')) AS "candidatesCount",
+            p.status,
+            p.created_at    AS "createdAt"
             FROM proposals p
             JOIN "Job" j ON j.id = p.job_id
             LEFT JOIN proposals p2 ON p2.job_id = j.id
             WHERE p.applicant_id = %s
-              AND p.status NOT IN ('cancelled','rejected')
+            AND p.status NOT IN ('cancelled','rejected')
             GROUP BY p.id, j.id
             ORDER BY p.created_at DESC
             """,
