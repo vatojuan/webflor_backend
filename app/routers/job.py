@@ -307,9 +307,13 @@ async def apply_to_job(
     job_id = payload.get("jobId")
     if not job_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Falta jobId")
+
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur  = conn.cursor()
+
+        # 1) Evitar duplicados activos
         cur.execute(
             """
             SELECT id, status
@@ -325,25 +329,42 @@ async def apply_to_job(
             raise HTTPException(status.HTTP_409_CONFLICT, detail="Ya estás postulado a esta oferta")
         if prev:
             cur.execute("DELETE FROM proposals WHERE id = %s", (prev[0],))
+
+        # 2) Leer label de la oferta
+        cur.execute(
+            'SELECT COALESCE(label, %s) FROM "Job" WHERE id = %s',
+            ("manual", job_id),
+        )
+        job_label = cur.fetchone()
+        job_label = job_label[0] if job_label else "manual"
+
+        # 3) Calcular estado inicial según etiqueta
+        proposal_status = "waiting" if job_label == "automatic" else "pending"
+
+        # 4) Insertar proposal con label y status correctos
         cur.execute(
             """
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-            VALUES (%s, %s, 'manual', 'pending', NOW())
+            VALUES (%s, %s, %s, %s, NOW())
             """,
-            (job_id, current_user.id),
+            (job_id, current_user.id, job_label, proposal_status),
         )
+
         conn.commit()
         return {"message": "Postulación registrada"}
+
     except HTTPException:
         raise
     except Exception:
-        if conn: conn.rollback()
+        if conn:
+            conn.rollback()
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno al postular")
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 @router.delete("/cancel-application", summary="Cancelar la postulación del usuario")
 async def cancel_application(
