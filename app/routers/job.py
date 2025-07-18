@@ -203,12 +203,13 @@ async def my_applications(current_user=Depends(get_current_user)):
                 p.id,
                 j.id            AS "jobId",
                 j.title         AS "jobTitle",
-                j."createdAt"   AS "jobPostedAt",       -- ← FIX aquí
+                j."createdAt"   AS "jobPostedAt",
                 COUNT(*) FILTER (
                     WHERE p2.status NOT IN ('cancelled','rejected')
                 )                 AS "candidatesCount",
+                p.label,
                 p.status,
-                p.created_at      AS "createdAt"
+                p.created_at     AS "createdAt"
             FROM proposals p
             JOIN "Job" j       ON j.id = p.job_id
             LEFT JOIN proposals p2 ON p2.job_id = j.id
@@ -219,6 +220,7 @@ async def my_applications(current_user=Depends(get_current_user)):
             """,
             (current_user.id,),
         )
+
         cols = [d[0] for d in cur.description]
         return {"applications": [dict(zip(cols, r)) for r in cur.fetchall()]}
     finally:

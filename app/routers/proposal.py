@@ -92,6 +92,27 @@ def send_whatsapp(phone: Optional[str], txt: str) -> None:
     if phone:
         logger.info("📲 WhatsApp → %s: %s", phone, txt)
 
+# ───────────────────────── Aviso de cancelación ───────────────────
+def send_cancel_warning_email(dest: str, job_title: str) -> None:
+    """
+    Envía al candidato un mail avisando que tiene 5 minutos para cancelar
+    su postulación si fue un error.
+    """
+    subj = "Postulación recibida en FAP Mendoza"
+    body = (
+        f"Hola,\n\n"
+        f"Has postulado a «{job_title}».\n\n"
+        f"Si fue un error o cambiaste de idea, tenés *5 minutos* para cancelar "
+        f"la postulación desde tu perfil. Después de ese tiempo, ya no podrá cancelarse.\n\n"
+        f"Gracias por usar FAP Mendoza.\n"
+        f"— Equipo FAP Mendoza"
+    )
+    try:
+        send_mail(dest, subj, body)
+        logger.info("✉️  aviso de cancelación enviado a %s", dest)
+    except Exception:
+        logger.exception("❌ Error enviando aviso de cancelación a %s", dest)
+
 # ─────────────────── Utilidades de tablas ────────────────────────
 def job_columns(cur) -> Set[str]:
     cur.execute("""
@@ -203,6 +224,7 @@ def deliver(pid: int, sleep_first: bool) -> None:
         if conn: conn.close()
 
 # ───────────────────────── End-points ─────────────────────────────
+
 @router.post("/create")
 def create(data: dict, bg: BackgroundTasks):
     job_id       = data.get("job_id")
@@ -252,7 +274,6 @@ def create(data: dict, bg: BackgroundTasks):
         ))
         row = cur.fetchone()
         if not row:
-            # En el improbable caso que no retorne id
             conn.commit()
             raise HTTPException(500, "No se pudo crear la propuesta")
         pid = row[0]
@@ -262,6 +283,13 @@ def create(data: dict, bg: BackgroundTasks):
         # 4) Si es automática, programar entrega
         if label == "automatic":
             bg.add_task(deliver, pid, True)
+
+        # 5) Enviar aviso de posibilidad de cancelar
+        cur.execute('SELECT title FROM "Job" WHERE id = %s', (job_id,))
+        job_title = cur.fetchone()[0]
+        cur.execute('SELECT email FROM "User" WHERE id = %s', (applicant_id,))
+        applicant_email = cur.fetchone()[0]
+        bg.add_task(send_cancel_warning_email, applicant_email, job_title)
 
         return {"proposal_id": pid}
 
