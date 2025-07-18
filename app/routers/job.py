@@ -5,11 +5,11 @@ Ofertas de empleo
 ────────────────────────────────────────────────────────────
 • GET    /api/job/                      – listar ofertas vigentes (con candidatesCount)
 • GET    /api/job/list                  – alias legacy
-• GET    /api/job/my-applications       – postulaciones del usuario (con datos de job)
+• GET    /api/job/my-applications       – postulaciones del usuario (con objeto job detallado)
 • GET    /api/job/apply/{token}         – confirma enlace y crea postulación
 • POST   /api/job/apply                 – postularse a una oferta directamente
 • DELETE /api/job/cancel-application    – cancelar postulación
-• GET    /api/job/{job_id}              – detalles de una oferta
+• GET    /api/job/{job_id}              – detalles de una oferta (con createdAt y expirationDate)
 • POST   /api/job/create                – alta de oferta por EMPLEADOR
 • POST   /api/job/create-admin          – alta de oferta por ADMIN
 """
@@ -200,29 +200,55 @@ async def my_applications(current_user=Depends(get_current_user)):
         cur.execute(
             """
             SELECT
-                p.id,
-                j.id            AS "jobId",
-                j.title         AS "jobTitle",
-                j."createdAt"   AS "jobPostedAt",
-                COUNT(*) FILTER (
-                    WHERE p2.status NOT IN ('cancelled','rejected')
-                )                 AS "candidatesCount",
-                p.label,
-                p.status,
-                p.created_at     AS "createdAt"
+              p.id,
+              j.id               AS job_id,
+              j.title            AS job_title,
+              j."createdAt"      AS job_created_at,
+              j."expirationDate" AS job_expiration_at,
+              COUNT(p2.*) FILTER (WHERE p2.status NOT IN ('cancelled','rejected')) AS job_candidates_count,
+              p.label,
+              p.status,
+              p.created_at       AS applied_at
             FROM proposals p
-            JOIN "Job" j       ON j.id = p.job_id
+            JOIN "Job" j           ON j.id = p.job_id
             LEFT JOIN proposals p2 ON p2.job_id = j.id
             WHERE p.applicant_id = %s
-            AND p.status NOT IN ('cancelled','rejected')
-            GROUP BY p.id, j.id
+              AND p.status NOT IN ('cancelled','rejected')
+            GROUP BY p.id, j.id, j."createdAt", j."expirationDate"
             ORDER BY p.created_at DESC
             """,
             (current_user.id,),
         )
 
-        cols = [d[0] for d in cur.description]
-        return {"applications": [dict(zip(cols, r)) for r in cur.fetchall()]}
+        applications = []
+        for (
+            pid,
+            jid,
+            jtitle,
+            jcreated,
+            jexp,
+            jcount,
+            plabel,
+            pstatus,
+            papplied
+        ) in cur.fetchall():
+            job_obj = {
+                "id": jid,
+                "title": jtitle,
+                "createdAt": jcreated.isoformat() if jcreated else None,
+                "expirationDate": jexp.isoformat() if jexp else None,
+                "candidatesCount": jcount
+            }
+            applications.append({
+                "id": pid,
+                "label": plabel,
+                "status": pstatus,
+                "createdAt": papplied.isoformat() if papplied else None,
+                "job": job_obj
+            })
+
+        return {"applications": applications}
+
     finally:
         if cur: cur.close()
         if conn: conn.close()
@@ -244,7 +270,7 @@ async def list_jobs(userId: Optional[int] = None):
             FROM "Job" j
             LEFT JOIN proposals p ON p.job_id = j.id
             WHERE j."expirationDate" IS NULL OR j."expirationDate" > NOW()
-            """ + ( ' AND j."userId"=%s' if userId else '' ) + """
+            """ + (' AND j."userId"=%s' if userId else '') + """
             GROUP BY j.id
             ORDER BY j.id DESC
             """,
@@ -309,13 +335,9 @@ async def apply_to_job(
     job_id = payload.get("jobId")
     if not job_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Falta jobId")
-
     conn = cur = None
     try:
-        conn = get_db_connection()
-        cur  = conn.cursor()
-
-        # 1) Evitar duplicados activos
+        conn = get_db_connection(); cur = conn.cursor()
         cur.execute(
             """
             SELECT id, status
@@ -332,18 +354,13 @@ async def apply_to_job(
         if prev:
             cur.execute("DELETE FROM proposals WHERE id = %s", (prev[0],))
 
-        # 2) Leer label de la oferta
         cur.execute(
             'SELECT COALESCE(label, %s) FROM "Job" WHERE id = %s',
             ("manual", job_id),
         )
-        job_label = cur.fetchone()
-        job_label = job_label[0] if job_label else "manual"
-
-        # 3) Calcular estado inicial según etiqueta
+        job_label = (cur.fetchone() or ["manual"])[0] or "manual"
         proposal_status = "waiting" if job_label == "automatic" else "pending"
 
-        # 4) Insertar proposal con label y status correctos
         cur.execute(
             """
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
@@ -351,22 +368,18 @@ async def apply_to_job(
             """,
             (job_id, current_user.id, job_label, proposal_status),
         )
-
         conn.commit()
         return {"message": "Postulación registrada"}
-
     except HTTPException:
         raise
     except Exception:
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno al postular")
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        if conn: conn.close()
+
 
 @router.delete("/cancel-application", summary="Cancelar la postulación del usuario")
 async def cancel_application(
@@ -391,7 +404,7 @@ async def cancel_application(
         row = cur.fetchone()
         if not row:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No existe postulación activa")
-        cur.execute("UPDATE proposals SET status='cancelled', cancelled_at=NOW() WHERE id=%s", (row[0],))
+        cur.execute("UPDATE proposals SET status='cancelled', cancelled_at=NOW() WHERE id = %s", (row[0],))
         conn.commit()
         return {"message": "Postulación cancelada"}
     except HTTPException:
@@ -414,12 +427,18 @@ async def get_job(job_id: int = Path(..., description="ID de la oferta")):
         cur.execute(
             """
             SELECT
-              j.id, j.title, j.description, j.requirements, j."expirationDate", j."userId",
+              j.id,
+              j.title,
+              j.description,
+              j.requirements,
+              j."createdAt",
+              j."expirationDate",
+              j."userId",
               COUNT(p.*) FILTER (WHERE p.status NOT IN ('cancelled','rejected')) AS "candidatesCount"
             FROM "Job" j
             LEFT JOIN proposals p ON p.job_id = j.id
             WHERE j.id = %s
-            GROUP BY j.id
+            GROUP BY j.id, j."createdAt", j."expirationDate"
             """,
             (job_id,),
         )
@@ -427,7 +446,12 @@ async def get_job(job_id: int = Path(..., description="ID de la oferta")):
         if not row:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Oferta no encontrada")
         cols = [d[0] for d in cur.description]
-        return {"job": dict(zip(cols, row))}
+        job = dict(zip(cols, row))
+        if job.get("createdAt"):
+            job["createdAt"] = job["createdAt"].isoformat()
+        if job.get("expirationDate"):
+            job["expirationDate"] = job["expirationDate"].isoformat()
+        return {"job": job}
     finally:
         if cur: cur.close()
         if conn: conn.close()
@@ -447,7 +471,7 @@ async def create_job(data: Dict[str, Any], current_user=Depends(get_current_user
     summary="Crear oferta (admin)",
 )
 async def create_admin_job(request: Request, admin_sub: str = Depends(get_current_admin_sub)):
-    data = await request.json()
+    data    = await request.json()
     raw_uid = data.get("userId")
     try:
         owner_id = int(raw_uid) if raw_uid else None
