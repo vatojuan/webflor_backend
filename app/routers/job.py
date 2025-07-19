@@ -1,5 +1,4 @@
 # app/routers/job.py
-
 """
 Ofertas de empleo
 ────────────────────────────────────────────────────────────
@@ -263,169 +262,6 @@ async def list_jobs(userId: Optional[int] = None):
         cur.execute(
             """
             SELECT
-              j.id, j.title, j.description, j.requirements, j."expirationDate", j."userId",
-              COALESCE(j.source, '') AS source,
-              COALESCE(j.label, '')  AS label,
-              COUNT(p.*) FILTER (WHERE p.status NOT IN ('cancelled','rejected')) AS "candidatesCount"
-            FROM "Job" j
-            LEFT JOIN proposals p ON p.job_id = j.id
-            WHERE j."expirationDate" IS NULL OR j."expirationDate" > NOW()
-            """ + (' AND j."userId"=%s' if userId else '') + """
-            GROUP BY j.id
-            ORDER BY j.id DESC
-            """,
-            (userId,) if userId else (),
-        )
-        cols = [d[0] for d in cur.description]
-        return {"offers": [dict(zip(cols, r)) for r in cur.fetchall()]}
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-
-@router.get("/apply/{token}", summary="Confirma y crea postulación vía enlace")
-async def confirm_apply(token: str = Path(..., description="Token enviado por email")):
-    conn = cur = None
-    try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT job_id, applicant_id
-              FROM apply_tokens
-             WHERE token::text = %s
-               AND used = FALSE
-               AND expires_at > NOW()
-            """,
-            (token,),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Token inválido o expirado")
-        job_id, applicant_id = row
-        cur.execute(
-            """
-            INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-            VALUES (%s, %s, 'automatic', 'waiting', NOW())
-            RETURNING id
-            """,
-            (job_id, applicant_id),
-        )
-        pid = cur.fetchone()[0]
-        cur.execute("UPDATE apply_tokens SET used = TRUE WHERE token::text = %s", (token,))
-        conn.commit()
-        threading.Thread(target=deliver, args=(pid, True), daemon=True).start()
-        jwt_user = jwt.encode({"sub": str(applicant_id), "role": "empleado"}, SECRET_KEY, algorithm=ALGORITHM)
-        return {"success": True, "token": jwt_user, "jobId": job_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        if conn: conn.rollback()
-        traceback.print_exc()
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-
-@router.post("/apply", summary="Postularse a una oferta directamente")
-async def apply_to_job(
-    payload: Dict[str, Any],
-    current_user=Depends(get_current_user),
-):
-    job_id = payload.get("jobId")
-    if not job_id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Falta jobId")
-    conn = cur = None
-    try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, status
-              FROM proposals
-             WHERE job_id = %s AND applicant_id = %s
-             ORDER BY created_at DESC
-             LIMIT 1
-            """,
-            (job_id, current_user.id),
-        )
-        prev = cur.fetchone()
-        if prev and prev[1] != "cancelled":
-            raise HTTPException(status.HTTP_409_CONFLICT, detail="Ya estás postulado a esta oferta")
-        if prev:
-            cur.execute("DELETE FROM proposals WHERE id = %s", (prev[0],))
-
-        cur.execute(
-            'SELECT COALESCE(label, %s) FROM "Job" WHERE id = %s',
-            ("manual", job_id),
-        )
-        job_label = (cur.fetchone() or ["manual"])[0] or "manual"
-        proposal_status = "waiting" if job_label == "automatic" else "pending"
-
-        cur.execute(
-            """
-            INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-            VALUES (%s, %s, %s, %s, NOW())
-            """,
-            (job_id, current_user.id, job_label, proposal_status),
-        )
-        conn.commit()
-        return {"message": "Postulación registrada"}
-    except HTTPException:
-        raise
-    except Exception:
-        if conn: conn.rollback()
-        traceback.print_exc()
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno al postular")
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-
-@router.delete("/cancel-application", summary="Cancelar la postulación del usuario")
-async def cancel_application(
-    payload: Dict[str, Any],
-    current_user=Depends(get_current_user),
-):
-    job_id = payload.get("jobId")
-    if not job_id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Falta jobId")
-    conn = cur = None
-    try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id
-              FROM proposals
-             WHERE job_id=%s AND applicant_id=%s AND status NOT IN ('cancelled','rejected')
-             LIMIT 1
-            """,
-            (job_id, current_user.id),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No existe postulación activa")
-        cur.execute("UPDATE proposals SET status='cancelled', cancelled_at=NOW() WHERE id = %s", (row[0],))
-        conn.commit()
-        return {"message": "Postulación cancelada"}
-    except HTTPException:
-        raise
-    except Exception:
-        if conn: conn.rollback()
-        traceback.print_exc()
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno al cancelar")
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-
-@router.get("/{job_id}", summary="Obtener detalles de una oferta")
-async def get_job(job_id: int = Path(..., description="ID de la oferta")):
-    conn = cur = None
-    try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT
               j.id,
               j.title,
               j.description,
@@ -433,57 +269,30 @@ async def get_job(job_id: int = Path(..., description="ID de la oferta")):
               j."createdAt",
               j."expirationDate",
               j."userId",
+              COALESCE(j.source, '') AS source,
+              COALESCE(j.label,  '') AS label,
               COUNT(p.*) FILTER (WHERE p.status NOT IN ('cancelled','rejected')) AS "candidatesCount"
             FROM "Job" j
             LEFT JOIN proposals p ON p.job_id = j.id
-            WHERE j.id = %s
+            WHERE j."expirationDate" IS NULL OR j."expirationDate" > NOW()
+            """ + (' AND j."userId"=%s' if userId else '') + """
             GROUP BY j.id, j."createdAt", j."expirationDate"
+            ORDER BY j.id DESC
             """,
-            (job_id,),
+            (userId,) if userId else (),
         )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Oferta no encontrada")
-        cols = [d[0] for d in cur.description]
-        job = dict(zip(cols, row))
-        if job.get("createdAt"):
-            job["createdAt"] = job["createdAt"].isoformat()
-        if job.get("expirationDate"):
-            job["expirationDate"] = job["expirationDate"].isoformat()
-        return {"job": job}
+
+        cols   = [d[0] for d in cur.description]
+        offers = []
+        for row in cur.fetchall():
+            d = dict(zip(cols, row))
+            if d.get("createdAt"):
+                d["createdAt"] = d["createdAt"].isoformat()
+            if d.get("expirationDate"):
+                d["expirationDate"] = d["expirationDate"].isoformat()
+            offers.append(d)
+
+        return {"offers": offers}
     finally:
         if cur: cur.close()
         if conn: conn.close()
-
-
-@router.post("/create", status_code=status.HTTP_201_CREATED, summary="Crear oferta (empleador)")
-async def create_job(data: Dict[str, Any], current_user=Depends(get_current_user)):
-    job_id, _ = _insert_job(data, owner_id=current_user.id, source="employer")
-    return {"message": "Oferta creada", "jobId": job_id}
-
-
-@router.post(
-    "/create-admin",
-    status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(oauth2_admin)],
-    summary="Crear oferta (admin)",
-)
-async def create_admin_job(request: Request, admin_sub: str = Depends(get_current_admin_sub)):
-    data    = await request.json()
-    raw_uid = data.get("userId")
-    try:
-        owner_id = int(raw_uid) if raw_uid else None
-    except:
-        owner_id = None
-    if not owner_id:
-        owner_id = get_admin_id_by_email(admin_sub)
-        if not owner_id:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Admin sin usuario asociado")
-    job_id, _ = _insert_job(
-        data,
-        owner_id=owner_id,
-        source=data.get("source", "admin"),
-        label_default=data.get("label", "manual"),
-    )
-    return {"message": "Oferta creada", "jobId": job_id}
-
