@@ -296,3 +296,28 @@ async def list_jobs(userId: Optional[int] = None):
     finally:
         if cur: cur.close()
         if conn: conn.close()
+
+@router.post(
+    "/create-admin",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(oauth2_admin)],
+    summary="Crear oferta (admin)",
+)
+async def create_admin_job(request: Request, admin_sub: str = Depends(get_current_admin_sub)):
+    data    = await request.json()
+    raw_uid = data.get("userId")
+    try:
+        owner_id = int(raw_uid) if raw_uid else None
+    except:
+        owner_id = None
+    if not owner_id:
+        owner_id = get_admin_id_by_email(admin_sub)
+        if not owner_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Admin sin usuario asociado")
+    job_id, _ = _insert_job(
+        data,
+        owner_id=owner_id,
+        source=data.get("source", "admin"),
+        label_default=data.get("label", "manual"),
+    )
+    return {"message": "Oferta creada", "jobId": job_id}
