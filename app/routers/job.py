@@ -336,48 +336,53 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
         if conn: conn.close()
 
 
-@router.post("/apply", summary="Postularse a una oferta directamente")
-async def apply_to_job(
-    payload: Dict[str, Any],
-    current_user=Depends(get_current_user),
-):
-    job_id = payload.get("jobId")
-    if not job_id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Falta jobId")
+@router.get("/apply/{token}", summary="Confirma y crea postulación vía enlace")
+async def confirm_apply(token: str = Path(..., description="Token enviado por email")):
     conn = cur = None
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        # evitar duplicados
-        cur.execute(
-            """
-            SELECT id, status
-              FROM proposals
-             WHERE job_id = %s AND applicant_id = %s
-             ORDER BY created_at DESC
+
+        # Buscar el token en la tabla matches
+        cur.execute("""
+            SELECT id, job_id, applicant_id, apply_token_used
+              FROM matches
+             WHERE apply_token = %s
              LIMIT 1
-            """,
-            (job_id, current_user.id),
-        )
-        prev = cur.fetchone()
-        if prev and prev[1] != "cancelled":
-            raise HTTPException(status.HTTP_409_CONFLICT, detail="Ya estás postulado a esta oferta")
-        if prev:
-            cur.execute("DELETE FROM proposals WHERE id = %s", (prev[0],))
+        """, (token,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Token inválido o expirado")
 
-        # determinar label/status
-        cur.execute('SELECT COALESCE(label, \'manual\') FROM "Job" WHERE id = %s', (job_id,))
-        job_label = (cur.fetchone() or ["manual"])[0] or "manual"
-        proposal_status = "waiting" if job_label == "automatic" else "pending"
+        match_id, job_id, applicant_id, used = row
 
-        cur.execute(
-            """
+        if used:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Este enlace ya fue utilizado")
+
+        cur.execute("""
             INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-            VALUES (%s, %s, %s, %s, NOW())
-            """,
-            (job_id, current_user.id, job_label, proposal_status),
-        )
+            VALUES (%s, %s, 'automatic', 'waiting', NOW())
+            RETURNING id
+        """, (job_id, applicant_id))
+        pid = cur.fetchone()[0]
+
+        cur.execute("""
+            UPDATE matches
+               SET apply_token_used = TRUE
+             WHERE id = %s
+        """, (match_id,))
+
         conn.commit()
-        return {"message": "Postulación registrada"}
+
+        threading.Thread(target=deliver, args=(pid, True), daemon=True).start()
+
+        jwt_user = jwt.encode({"sub": str(applicant_id), "role": "empleado"}, SECRET_KEY, algorithm=ALGORITHM)
+        return {"success": True, "token": jwt_user, "jobId": job_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn: conn.rollback()
+        traceback.print_exc()
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     finally:
         if cur: cur.close()
         if conn: conn.close()
