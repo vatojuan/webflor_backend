@@ -303,44 +303,6 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
     conn = cur = None
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT job_id, applicant_id
-              FROM apply_tokens
-             WHERE token::text = %s
-               AND used = FALSE
-               AND expires_at > NOW()
-            """,
-            (token,),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Token inválido o expirado")
-        job_id, applicant_id = row
-        cur.execute(
-            """
-            INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-            VALUES (%s, %s, 'automatic', 'waiting', NOW())
-            RETURNING id
-            """,
-            (job_id, applicant_id),
-        )
-        pid = cur.fetchone()[0]
-        cur.execute("UPDATE apply_tokens SET used = TRUE WHERE token::text = %s", (token,))
-        conn.commit()
-        threading.Thread(target=deliver, args=(pid, True), daemon=True).start()
-        jwt_user = jwt.encode({"sub": str(applicant_id), "role": "empleado"}, SECRET_KEY, algorithm=ALGORITHM)
-        return {"success": True, "token": jwt_user, "jobId": job_id}
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-
-@router.get("/apply/{token}", summary="Confirma y crea postulación vía enlace")
-async def confirm_apply(token: str = Path(..., description="Token enviado por email")):
-    conn = cur = None
-    try:
-        conn = get_db_connection(); cur = conn.cursor()
 
         # Buscar el token en la tabla matches
         cur.execute("""
@@ -487,3 +449,31 @@ async def create_admin_job(request: Request, admin_sub: str = Depends(get_curren
         label_default=data.get("label", "manual"),
     )
     return {"message": "Oferta creada", "jobId": job_id}
+@router.post("/apply", status_code=status.HTTP_201_CREATED, summary="Postularse a una oferta")
+async def apply_to_job(request: Request, current_user=Depends(get_current_user)):
+    data = await request.json()
+    job_id = data.get("jobId")
+    if not job_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Falta jobId")
+
+    conn = cur = None
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
+            VALUES (%s, %s, 'manual', 'pending', NOW())
+            ON CONFLICT (job_id, applicant_id)
+            DO UPDATE SET status='pending'
+            RETURNING id
+        """, (job_id, current_user.id))
+        pid = cur.fetchone()[0]
+        conn.commit()
+        return {"message": "Postulación registrada", "proposalId": pid}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        traceback.print_exc()
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al postularse")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
