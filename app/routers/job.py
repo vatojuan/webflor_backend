@@ -449,6 +449,7 @@ async def create_admin_job(request: Request, admin_sub: str = Depends(get_curren
         label_default=data.get("label", "manual"),
     )
     return {"message": "Oferta creada", "jobId": job_id}
+
 @router.post("/apply", status_code=status.HTTP_201_CREATED, summary="Postularse a una oferta")
 async def apply_to_job(request: Request, current_user=Depends(get_current_user)):
     data = await request.json()
@@ -458,17 +459,72 @@ async def apply_to_job(request: Request, current_user=Depends(get_current_user))
 
     conn = cur = None
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Verificar si ya existe una propuesta para este job y usuario
         cur.execute("""
-            INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
-            VALUES (%s, %s, 'manual', 'pending', NOW())
-            ON CONFLICT (job_id, applicant_id)
-            DO UPDATE SET status='pending'
-            RETURNING id
+            SELECT id, label FROM proposals
+             WHERE job_id = %s AND applicant_id = %s
+             LIMIT 1
         """, (job_id, current_user.id))
-        pid = cur.fetchone()[0]
-        conn.commit()
-        return {"message": "Postulación registrada", "proposalId": pid}
+        row = cur.fetchone()
+
+        if row:
+            pid, label = row
+            if label == "automatic":
+                cur.execute("""
+                    UPDATE proposals
+                       SET status='waiting', cancelled_at=NULL, created_at=NOW()
+                     WHERE id = %s
+                     RETURNING id
+                """, (pid,))
+                conn.commit()
+
+                # Relanzar entrega automática
+                threading.Thread(target=deliver, args=(pid, True), daemon=True).start()
+                return {"message": "Reactivada como automática", "proposalId": pid}
+            else:
+                cur.execute("""
+                    UPDATE proposals
+                       SET status='pending', cancelled_at=NULL, created_at=NOW()
+                     WHERE id = %s
+                     RETURNING id
+                """, (pid,))
+                conn.commit()
+                return {"message": "Reactivada como manual", "proposalId": pid}
+
+        # No existía propuesta previa, determinar tipo de oferta
+        cur.execute("""
+            SELECT label FROM "Job" WHERE id = %s
+        """, (job_id,))
+        job_row = cur.fetchone()
+        if not job_row:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Oferta no encontrada")
+        
+        job_label = job_row[0] or "manual"
+
+        if job_label == "automatic":
+            cur.execute("""
+                INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
+                VALUES (%s, %s, 'automatic', 'waiting', NOW())
+                RETURNING id
+            """, (job_id, current_user.id))
+            pid = cur.fetchone()[0]
+            conn.commit()
+
+            threading.Thread(target=deliver, args=(pid, True), daemon=True).start()
+            return {"message": "Postulación automática registrada", "proposalId": pid}
+        else:
+            cur.execute("""
+                INSERT INTO proposals (job_id, applicant_id, label, status, created_at)
+                VALUES (%s, %s, 'manual', 'pending', NOW())
+                RETURNING id
+            """, (job_id, current_user.id))
+            pid = cur.fetchone()[0]
+            conn.commit()
+            return {"message": "Postulación manual registrada", "proposalId": pid}
+
     except Exception as e:
         if conn:
             conn.rollback()
@@ -477,3 +533,4 @@ async def apply_to_job(request: Request, current_user=Depends(get_current_user))
     finally:
         if cur: cur.close()
         if conn: conn.close()
+
