@@ -26,7 +26,7 @@ from typing import List, Optional, Tuple, Dict, Any
 import requests
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Request, Path, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt
 
 from app.database import get_db_connection
@@ -38,7 +38,14 @@ SECRET_KEY = os.getenv("SECRET_KEY", "")
 ALGORITHM  = os.getenv("ALGORITHM", "HS256")
 
 oauth2_admin = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
-oauth2_user  = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2_user = HTTPBearer()
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_user)):
+    token = credentials.credentials
+    sub = _decode(token).get("sub")
+    if not sub:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token usuario inválido")
+    return SimpleNamespace(id=int(sub))
 
 router = APIRouter(prefix="/api/job", tags=["job"])
 
@@ -53,13 +60,6 @@ def _decode(token: str) -> Dict[str, Any]:
 
 def get_current_admin_sub(tok: str = Depends(oauth2_admin)) -> str:
     return _decode(tok).get("sub", "")
-
-
-def get_current_user(tok: str = Depends(oauth2_user)):
-    sub = _decode(tok).get("sub")
-    if not sub:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token usuario inválido")
-    return SimpleNamespace(id=int(sub))
 
 
 # ─────────────────── DB helpers ──────────────────────
