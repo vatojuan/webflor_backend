@@ -166,8 +166,8 @@ async def confirm_email(code: str = Query(...)):
         description_response = client.chat.completions.create(
             model="gpt-4-turbo",
             messages=description_prompt,
-            max_tokens=300,
-            temperature=0.7
+            max_tokens=200,
+            temperature=0.5
         )
 
         description = description_response.choices[0].message.content.strip()
@@ -181,7 +181,7 @@ async def confirm_email(code: str = Query(...)):
             follow_up_response = client.chat.completions.create(
                 model="gpt-4-turbo",
                 messages=follow_up_prompt,
-                max_tokens=200
+                max_tokens=50
             )
             description += " " + follow_up_response.choices[0].message.content.strip()
 
