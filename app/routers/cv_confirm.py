@@ -85,9 +85,7 @@ def extract_name(text):
     return name_from_cv
 
 def sanitize_filename(filename: str) -> str:
-    """Reemplaza espacios por guiones bajos y elimina caracteres problemáticos.
-    Nota: Esta función está pensada para sanitizar nombres de archivo, no rutas completas.
-    """
+    """Reemplaza espacios por guiones bajos y elimina caracteres problemáticos."""
     filename = filename.replace(" ", "_")
     filename = re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
     return filename
@@ -101,24 +99,19 @@ async def confirm_email(code: str = Query(...)):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Buscar el registro pendiente en pending_users
         cur.execute("SELECT email, cv_url FROM pending_users WHERE confirmation_code = %s", (code,))
         user_data = cur.fetchone()
         if not user_data:
             raise HTTPException(status_code=400, detail="Código de confirmación inválido")
         user_email, cv_url = user_data
         
-        # Convertir el email a minúsculas para mantener la consistencia
         user_email = user_email.lower()
         print(f"✅ Registro encontrado para {user_email} con CV URL: {cv_url}")
 
-        # Decodificar la URL para convertir %20 a espacios
         decoded_url = urllib.parse.unquote(cv_url)
         print(f"🔎 URL decodificada: {decoded_url}")
 
-        # Extraer el path del objeto (la parte luego de la URL base)
         old_path_full = decoded_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
-        # Dividir en carpeta y nombre del archivo para sanitizar solo el nombre
         parts = old_path_full.split("/", 1)
         if len(parts) == 2:
             folder, filename = parts
@@ -128,7 +121,6 @@ async def confirm_email(code: str = Query(...)):
             old_path = sanitize_filename(old_path_full)
         print(f"🔎 Path del archivo obtenido: {old_path}")
 
-        # Generar el nuevo path reemplazando la carpeta
         new_path = old_path.replace("pending_cv_uploads", "employee-documents")
         print(f"🔎 Nuevo path: {new_path}")
 
@@ -138,17 +130,14 @@ async def confirm_email(code: str = Query(...)):
         new_cv_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{new_path}"
         print(f"✅ CV movido a {new_cv_url}")
 
-        # Descargar el CV desde GCS como bytes
         file_bytes = new_blob.download_as_bytes()
 
-        # Extraer el texto completo del CV
         text_content = extract_text_from_pdf(file_bytes)
         if not text_content:
             raise HTTPException(status_code=400, detail="No se pudo extraer texto del CV")
         print(f"✅ Texto del CV obtenido (total de {len(text_content)} caracteres)")
         print(f"🔎 Fragmento inicial del texto:\n{text_content[:500]}")
 
-        # Extraer datos: teléfono y el nombre usando OpenAI
         phone_number = extract_phone(text_content)
         print(f"✅ Teléfono extraído: {phone_number}")
         name_from_cv = extract_name(text_content)
@@ -157,37 +146,57 @@ async def confirm_email(code: str = Query(...)):
             name_from_cv = user_email.split("@")[0]
         print(f"✅ Nombre extraído con OpenAI: {name_from_cv}")
 
-        # Generar descripción automática con OpenAI(revisar)
+        # --- INICIO DEL BLOQUE MEJORADO ---
+        # Generar descripción profesional y adaptativa con OpenAI
+        print("🧠 Iniciando generación de descripción profesional y adaptativa...")
+
+        # 1. Prompt Mejorado: Damos instrucciones claras, profesionales y con reglas explícitas.
         description_prompt = [
-            {"role": "system", "content": "Eres un experto en recursos humanos."},
-            {"role": "user", "content": f"Genera una descripción profesional para el siguiente CV:\n\n{text_content[:2000]}"}
+            {
+                "role": "system",
+                "content": (
+                    "Eres un analista de RR.HH. experto y tu objetivo es crear un resumen profesional y atractivo para un perfil de candidato. "
+                    "Tu respuesta debe ser un párrafo único y coherente."
+                    "Sigue estas reglas estrictamente:\n"
+                    "1. Basa tu análisis exclusivamente en el texto del CV proporcionado.\n"
+                    "2. Identifica y destaca la experiencia laboral más relevante, las habilidades clave y los logros más notables.\n"
+                    "3. La longitud de tu resumen debe ser proporcional a la cantidad de información útil en el CV. Si el CV es breve o poco detallado, genera un resumen breve y conciso. NO inventes ni añadas información de relleno para alargarlo.\n"
+                    "4. El resumen final NO debe superar los 950 caracteres. Usa este límite para ser conciso, no para rellenar espacio.\n"
+                    "5. Redacta en un tono profesional y directo. No incluyas frases como 'El candidato parece...' o 'El CV sugiere...'."
+                )
+            },
+            {
+                "role": "user",
+                "content": f"Analiza y resume el siguiente CV:\n\n---\n{text_content[:4000]}\n---"
+            }
         ]
 
+        # 2. Parámetros Ajustados para dar libertad a la IA para que cumpla las instrucciones.
         description_response = client.chat.completions.create(
             model="gpt-4-turbo",
             messages=description_prompt,
-            max_tokens=200,
-            temperature=0.5
+            max_tokens=700,  # Suficiente para ~2000 caracteres. Evita cortes por este límite.
+            temperature=0.6,
+            top_p=1,
+            frequency_penalty=0.1, # Ligeramente penaliza repetir las mismas frases.
+            presence_penalty=0.1   # Ligeramente penaliza repetir los mismos conceptos.
         )
 
         description = description_response.choices[0].message.content.strip()
 
-        # Si la descripción parece cortada, pedimos a OpenAI que continúe
-        if len(description) >= 280:
-            follow_up_prompt = [
-                {"role": "system", "content": "Eres un experto en recursos humanos."},
-                {"role": "user", "content": "Continúa la descripción anterior con más detalles."}
-            ]
-            follow_up_response = client.chat.completions.create(
-                model="gpt-4-turbo",
-                messages=follow_up_prompt,
-                max_tokens=50
-            )
-            description += " " + follow_up_response.choices[0].message.content.strip()
+        # 3. Verificación de seguridad (opcional pero recomendado)
+        if len(description) > 1000:
+            print(f"⚠️ Advertencia: La descripción generada superó los 1000 caracteres ({len(description)}). Se truncará.")
+            # Truncado inteligente: cortar en el último punto para no dejar una frase a medias.
+            last_period_index = description[:1000].rfind('.')
+            if last_period_index != -1:
+                description = description[:last_period_index + 1]
+            else:
+                description = description[:997] + "..."
 
-        print(f"✅ Descripción generada: {description}")
+        print(f"✅ Descripción generada ({len(description)} caracteres): {description}")
+        # --- FIN DEL BLOQUE MEJORADO ---
 
-        # Generar embedding del CV completo
         embedding_response = client.embeddings.create(
             model="text-embedding-ada-002",
             input=text_content
@@ -195,7 +204,6 @@ async def confirm_email(code: str = Query(...)):
         embedding_cv = embedding_response.data[0].embedding
         print("✅ Embedding del CV generado exitosamente")
 
-        # Guardar el embedding del CV en la tabla FileEmbedding
         cur.execute(
             'INSERT INTO "FileEmbedding" ("fileKey", embedding, "createdAt") VALUES (%s, %s::vector, NOW()) '
             'ON CONFLICT ("fileKey") DO UPDATE SET embedding = EXCLUDED.embedding, "createdAt" = NOW()',
@@ -204,7 +212,6 @@ async def confirm_email(code: str = Query(...)):
         conn.commit()
         print("✅ Embedding del CV almacenado en FileEmbedding")
 
-        # Generar embedding de la descripción
         embedding_response_desc = client.embeddings.create(
             model="text-embedding-ada-002",
             input=description
@@ -212,11 +219,9 @@ async def confirm_email(code: str = Query(...)):
         embedding_desc = embedding_response_desc.data[0].embedding
         print("✅ Embedding de la descripción generado exitosamente")
 
-        # Generar contraseña segura y hashearla
         plain_password, hashed_password = generate_secure_password()
         print("✅ Contraseña segura generada y hasheada")
 
-        # Insertar o actualizar el usuario en la tabla "User"
         cur.execute(
             'INSERT INTO "User" (email, name, role, description, phone, password, confirmed, "cvUrl", embedding) VALUES (%s, %s, %s, %s, %s, %s, TRUE, %s, %s) '
             'ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description, phone = EXCLUDED.phone, '
@@ -227,7 +232,6 @@ async def confirm_email(code: str = Query(...)):
         conn.commit()
         print("✅ Usuario insertado/actualizado en la base de datos con id:", user_id)
 
-        # Insertar el registro en EmployeeDocument para que el CV figure en el perfil del usuario
         cur.execute(
             'INSERT INTO "EmployeeDocument" ("userId", url, "fileKey", "originalName", "createdAt") VALUES (%s, %s, %s, %s, NOW())',
             (user_id, new_cv_url, new_path, new_path.split("/")[-1])
@@ -235,12 +239,10 @@ async def confirm_email(code: str = Query(...)):
         conn.commit()
         print("✅ Registro en EmployeeDocument insertado")
 
-        # Eliminar el registro en pending_users
         cur.execute("DELETE FROM pending_users WHERE email = %s", (user_email,))
         conn.commit()
         print("✅ Registro en pending_users eliminado")
 
-        # Enviar email de credenciales al usuario
         send_credentials_email(user_email, user_email, plain_password)
         print(f"✅ Credenciales enviadas a {user_email}")
 
