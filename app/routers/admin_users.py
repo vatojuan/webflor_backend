@@ -4,12 +4,13 @@ import json
 import psycopg2
 import re
 import io
+import datetime  # <--- IMPORTANTE: Se añade este import
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from dotenv import load_dotenv
 from google.cloud import storage
 from PyPDF2 import PdfReader
 from app.utils.auth_utils import get_current_admin
-from app.services.embedding import generate_file_embedding, get_db_connection  # Usamos el get_db_connection de embedding.py
+from app.services.embedding import generate_file_embedding, get_db_connection
 
 load_dotenv()
 
@@ -67,7 +68,6 @@ def list_users(current_admin: str = Depends(get_current_admin)):
 def update_user(user_id: str, data: dict, current_admin: str = Depends(get_current_admin)):
     """
     Actualiza el nombre, teléfono y descripción del usuario y regenera el embedding de la descripción.
-    Se espera que data incluya: { "name": "...", "phone": "...", "description": "..." }
     """
     try:
         name = data.get("name")
@@ -83,7 +83,6 @@ def update_user(user_id: str, data: dict, current_admin: str = Depends(get_curre
         cur.close()
         conn.close()
 
-        # Regenerar el embedding a partir de la nueva descripción
         from app.services.embedding import update_user_embedding
         update_user_embedding(user_id)
 
@@ -94,10 +93,7 @@ def update_user(user_id: str, data: dict, current_admin: str = Depends(get_curre
 @router.delete("/{user_id}")
 def delete_user(user_id: str, current_admin: str = Depends(get_current_admin)):
     """
-    Elimina el usuario y, además, elimina:
-      - Sus archivos almacenados en GCS
-      - Registros en EmployeeDocument
-      - Embeddings en file_embeddings
+    Elimina el usuario y sus datos asociados.
     """
     try:
         conn = get_db_connection()
@@ -122,8 +118,7 @@ def delete_user(user_id: str, current_admin: str = Depends(get_current_admin)):
 @router.post("/{user_id}/files")
 def upload_user_file(user_id: str, file: UploadFile = File(...), current_admin: str = Depends(get_current_admin)):
     """
-    Sube un archivo para el usuario, extrae el texto y genera el embedding del contenido,
-    registrándolo en la tabla "FileEmbedding". Además, registra el archivo en "EmployeeDocument".
+    Sube un archivo para un usuario y genera su embedding.
     """
     try:
         file_bytes = file.file.read()
@@ -133,12 +128,13 @@ def upload_user_file(user_id: str, file: UploadFile = File(...), current_admin: 
         blob = bucket.blob(file_key)
         blob.upload_from_string(file_bytes, content_type=file.content_type)
         file_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{file_key}"
-        # Extraer texto del archivo (se asume PDF)
+        
         text_content = extract_text_from_pdf(file_bytes)
         if not text_content:
             raise HTTPException(status_code=400, detail="No se pudo extraer texto del archivo para generar embedding")
-        # Generar embedding del contenido usando la función del servicio
+        
         embedding_file = generate_file_embedding(text_content)
+        
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
@@ -147,17 +143,20 @@ def upload_user_file(user_id: str, file: UploadFile = File(...), current_admin: 
         )
         file_id = cur.fetchone()[0]
         conn.commit()
+        
         cur.execute(
             'INSERT INTO "FileEmbedding" ("fileKey", embedding, "createdAt") VALUES (%s, %s::vector, NOW()) '
             'ON CONFLICT ("fileKey") DO UPDATE SET embedding = EXCLUDED.embedding, "createdAt" = NOW()',
             (file_key, embedding_file)
         )
         conn.commit()
+        
         cur.execute('SELECT id, url, "originalName" FROM "EmployeeDocument" WHERE "userId" = %s', (user_id,))
         files = cur.fetchall()
         files_list = [{"id": f[0], "url": f[1], "filename": f[2]} for f in files]
         cur.close()
         conn.close()
+        
         return {"message": "Archivo subido y embedding generado", "files": files_list}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -165,10 +164,7 @@ def upload_user_file(user_id: str, file: UploadFile = File(...), current_admin: 
 @router.delete("/{user_id}/files/{file_id}")
 def delete_user_file(user_id: str, file_id: str, current_admin: str = Depends(get_current_admin)):
     """
-    Elimina un archivo específico:
-      - Borra el archivo en GCS.
-      - Elimina el registro en EmployeeDocument.
-      - Elimina el embedding asociado en FileEmbedding.
+    Elimina un archivo específico de un usuario.
     """
     try:
         conn = get_db_connection()
@@ -177,19 +173,67 @@ def delete_user_file(user_id: str, file_id: str, current_admin: str = Depends(ge
         result = cur.fetchone()
         if not result:
             raise HTTPException(status_code=404, detail="Archivo no encontrado")
+        
         file_key = result[0]
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(file_key)
         blob.delete()
+        
         cur.execute('DELETE FROM "EmployeeDocument" WHERE id = %s', (file_id,))
         conn.commit()
+        
         cur.execute('DELETE FROM "FileEmbedding" WHERE "fileKey" = %s', (file_key,))
         conn.commit()
+        
         cur.execute('SELECT id, url, "originalName" FROM "EmployeeDocument" WHERE "userId" = %s', (user_id,))
         files = cur.fetchall()
         files_list = [{"id": f[0], "url": f[1], "filename": f[2]} for f in files]
         cur.close()
         conn.close()
+        
         return {"message": "Archivo y su embedding eliminados", "files": files_list}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# =================================================================
+# === NUEVA RUTA AÑADIDA PARA GENERAR URL DE DESCARGA SEGURA ===
+# =================================================================
+@router.get("/files/{file_id}/signed-url")
+def get_signed_url_for_file(file_id: int, current_admin: str = Depends(get_current_admin)):
+    """
+    Genera una URL firmada (temporal y segura) para descargar un archivo.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # 1. Buscar el 'fileKey' del archivo en la base de datos
+        cur.execute('SELECT "fileKey" FROM "EmployeeDocument" WHERE id = %s', (file_id,))
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Archivo no encontrado en la base de datos.")
+
+        file_key = result[0]
+        
+        # 2. Generar la URL firmada desde Google Cloud Storage
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob(file_key)
+
+        # La URL expirará en 15 minutos
+        expiration_time = datetime.timedelta(minutes=15)
+        
+        signed_url = blob.generate_signed_url(
+            version="v4",
+            expiration=expiration_time,
+            method="GET",
+        )
+
+        return {"url": signed_url}
+
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {e}")
