@@ -25,9 +25,16 @@ from app.routers import (
     apply,
     match,
     admin_templates,
+    admin_users,
+    admin_config,
+    cv_admin_upload,
+    email_db_admin,
+    job_admin,
     # Asegúrate de que todos tus archivos de router estén importados aquí.
-    # Por ejemplo: admin_users, admin_config, etc.
 )
+# Importamos el router de autenticación de admin desde su ubicación específica
+from backend.auth import router as admin_auth_router
+
 
 # ─────────────────── Configuración de la App ───────────────────
 load_dotenv()
@@ -74,7 +81,15 @@ app.include_router(apply.router)
 app.include_router(proposal.router)
 app.include_router(match.router)
 app.include_router(admin_templates.router)
-# ... (incluye aquí el .router de cada módulo de admin que falte)
+app.include_router(admin_users.router)
+app.include_router(admin_config.router)
+app.include_router(cv_admin_upload.router)
+app.include_router(email_db_admin.router)
+app.include_router(job_admin.router)
+
+# Incluimos el router de login de admin con su prefijo
+app.include_router(admin_auth_router, prefix="/auth", tags=["admin"])
+
 
 # ─────────────────── Endpoints de Raíz ───────────────────
 @app.get("/")
@@ -87,4 +102,3 @@ def list_routes():
     logger.info("✅ Rutas cargadas exitosamente:")
     for route in url_list:
         logger.info(f"  - Path: {route['path']}")
-
