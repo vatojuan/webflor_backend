@@ -6,162 +6,94 @@ from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
+import logging
 
-# ──────────── Routers públicos ────────────
+# --- Configuración del Logger ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# --- Carga de Routers ---
 from app.routers import (
     auth as public_auth,
     cv_confirm,
     cv_upload,
-    cv_processing,
     files,
-    file_processing,
     integration,
     users,
     webhooks,
-)
-
-# Login de administradores
-from backend.auth import router as admin_router
-
-# ───── Routers de administración (con token) ─────
-from app.routers import (
-    cv_admin_upload,
-    job,            # prefix="/api/job"
-    job_admin,      # prefix="/api/job"
-    admin_users,
+    job,
     proposal,
+    apply as apply_router,
+    match as matchings_admin_router,
+    admin_templates as admin_templates_router,
+    # ... (Si faltan otros routers, asegúrate de importarlos)
 )
-from app.routers.match           import router as matchings_admin_router   # prefix="/api/match"
-from app.routers.admin_config    import router as admin_config_router
-from app.routers.admin_templates import router as admin_templates_router
-from app.routers.email_db_admin  import router as email_db_admin_router      # prefix="/api/admin/emails"
+# (Es posible que algunos routers como cv_processing, file_processing, etc.,
+# necesiten ser importados aquí si no están ya incluidos en otros módulos)
 
-# Nuevo router para confirmar postulaciones sin login
-from app.routers.apply           import router as apply_router
-
-# ─────────────────── Config global ───────────────────
+# ─────────────────── Configuración de la App ───────────────────
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM  = os.getenv("ALGORITHM", "HS256")
 
 app = FastAPI(
-    proxy_headers=True,
-    redirect_slashes=False,
+    title="FAP Mendoza API",
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
-# ─────────────────── CORS ───────────────────
-# Leer FRONTEND_ORIGINS de .env como "https://www.fapmendoza.com,https://fapmendoza.online"
-origins_env = os.getenv("FRONTEND_ORIGINS", "")
+# ─────────────────── Middleware de CORS ───────────────────
+origins_env = os.getenv("FRONTEND_ORIGINS", "http://localhost:3000,https://fapmendoza.online")
 origins = [o.strip() for o in origins_env.split(",") if o.strip()]
-
-# Si no hay ninguno configurado, para desarrollo permitir todos
-if not origins:
-    origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = origins,
-    allow_credentials = True,
-    allow_methods     = ["*"],
-    allow_headers     = ["*"],
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# ─────── Logging mínimo ───────
+# ─────────────────── Middleware de Logging ───────────────────
 @app.middleware("http")
 async def log_request(request: Request, call_next):
-    print("📥", request.method, request.url.path)
-    resp = await call_next(request)
-    print("📤", resp.status_code)
-    return resp
+    logger.info(f"📥 {request.method} {request.url.path}")
+    response = await call_next(request)
+    logger.info(f"📤 {response.status_code}")
+    return response
 
-# ─────────────────── Auth helper ───────────────────
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/admin-login")
+# ─────────────────── Inclusión de Routers ───────────────────
+# Nota: La convención es definir el prefijo dentro del APIRouter en cada archivo,
+# y no al incluirlo aquí, para evitar duplicados.
 
-def get_current_admin(token: str = Depends(oauth2_scheme)):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        sub     = payload.get("sub")
-        if not sub:
-            raise JWTError()
-        return sub
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token inválido o expirado")
+# Routers Públicos
+app.include_router(public_auth.router)
+app.include_router(cv_confirm.router)
+app.include_router(cv_upload.router)
+app.include_router(files.router)
+app.include_router(integration.router)
+app.include_router(users.router)
+app.include_router(webhooks.router)
+app.include_router(job.router) # Contiene endpoints públicos de jobs
+app.include_router(apply_router)
 
-# ─────────────────── Routers públicos ───────────────────
-for r in (
-    public_auth.router,
-    cv_confirm.router,
-    cv_upload.router,
-    cv_processing.router,
-    files.router,
-    file_processing.router,
-    integration.router,
-    users.router,
-    webhooks.router,
-):
-    app.include_router(r)
+# Routers de Administración (Protegidos)
+# La protección se define ahora dentro de cada router para mayor claridad.
+app.include_router(proposal.router)
+app.include_router(matchings_admin_router)
+app.include_router(admin_templates_router)
+# app.include_router(admin_users.router) # Descomentar si tienes este router
+# ... (incluir otros routers de admin aquí)
 
-# Endpoint público para confirmar postulaciones (sin login)
-app.include_router(apply_router, prefix="", tags=["apply"])
 
-# ─────────────────── Auth admin login ───────────────────
-app.include_router(admin_router, prefix="/auth", tags=["admin"])
-
-# ─────────────────── Routers protegidos ───────────────────
-app.include_router(
-    cv_admin_upload.router,
-    tags=["cv_admin"],
-    dependencies=[Depends(get_current_admin)],
-)
-
-# ────── Job (público) y job-admin (protegido) ──────
-app.include_router(job.router)  # prefix="/api/job"
-app.include_router(
-    job_admin.router,
-    dependencies=[Depends(get_current_admin)],
-)
-
-# ────── Otros protegidos ──────
-app.include_router(admin_users.router, tags=["admin_users"])
-app.include_router(proposal.router, tags=["proposals"])
-
-app.include_router(
-    admin_templates_router,
-    prefix="/api/admin/templates",
-    tags=["admin_templates"],
-    dependencies=[Depends(get_current_admin)],
-)
-
-app.include_router(
-    matchings_admin_router,  # prefix="/api/match"
-    tags=["matchings"],
-    dependencies=[Depends(get_current_admin)],
-)
-
-app.include_router(
-    admin_config_router,
-    tags=["admin_config"],
-    dependencies=[Depends(get_current_admin)],
-)
-
-app.include_router(
-    email_db_admin_router,  # prefix="/api/admin/emails"
-    tags=["email_db"],
-    dependencies=[Depends(get_current_admin)],
-)
-
-# ─────────────────── Endpoints varios ───────────────────
-@app.get("/admin/protected", tags=["admin"])
-def admin_protected(user = Depends(get_current_admin)):
-    return {"message": f"Bienvenido, {user}"}
-
+# ─────────────────── Endpoints de Raíz ───────────────────
 @app.get("/")
 def home():
-    return {"ok": True, "message": "API viva y en HTTPS"}
+    return {"ok": True, "message": "API de FAP Mendoza funcionando."}
 
 @app.on_event("startup")
 def list_routes():
-    for r in app.routes:
-        print("✅ Ruta cargada:", r.path)
+    url_list = [{"path": route.path, "name": route.name} for route in app.routes]
+    logger.info("✅ Rutas cargadas:")
+    for route in url_list:
+        logger.info(f"  - Path: {route['path']}")

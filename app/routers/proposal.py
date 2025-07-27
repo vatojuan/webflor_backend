@@ -55,10 +55,226 @@ def db() -> psycopg2.extensions.connection:
 
 # ─────────────────── Lógica Principal de Envío (Deliver) ───────────────────
 def deliver(proposal_id: int, sleep_first: bool) -> None:
-    # ... (La lógica de esta función ya estaba correcta en la versión anterior)
-    pass
+    """
+    Procesa y envía una única propuesta al empleador.
+    Toda la lógica de email se delega a email_utils.
+    """
+    if sleep_first:
+        logger.info(f"⏳ Esperando {AUTO_DELAY}s para procesar propuesta {proposal_id}")
+        time.sleep(AUTO_DELAY)
+
+    conn = cur = None
+    try:
+        conn = db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # 1. Validar estado de la propuesta
+        cur.execute("SELECT status, job_id, applicant_id FROM proposals WHERE id = %s", (proposal_id,))
+        proposal_data = cur.fetchone()
+        if not proposal_data:
+            logger.warning(f"Propuesta {proposal_id} no encontrada al intentar enviarla.")
+            return
+        
+        status = proposal_data['status']
+        job_id = proposal_data['job_id']
+        applicant_id = proposal_data['applicant_id']
+        
+        if (sleep_first and status != "waiting") or (not sleep_first and status != "sending"):
+            logger.info(f"Envío de propuesta {proposal_id} omitido. Estado actual: {status}")
+            return
+
+        # 2. Recolectar toda la información necesaria
+        cur.execute('SELECT title, label, contact_email, "contactPhone", "userId" FROM "Job" WHERE id = %s', (job_id,))
+        job_info = cur.fetchone()
+        job_title, job_label, contact_email, contact_phone, owner_id = job_info['title'], job_info['label'], job_info['contact_email'], job_info['contactPhone'], job_info['userId']
+
+        cur.execute('SELECT name, email, "cvUrl" FROM "User" WHERE id = %s', (applicant_id,))
+        applicant_info = cur.fetchone()
+        applicant_name, applicant_email, cv_url = applicant_info['name'], applicant_info['email'], applicant_info['cvUrl']
+
+        cur.execute('SELECT name, email, phone FROM "User" WHERE id = %s', (owner_id,))
+        employer_data = cur.fetchone() or {"name": "", "email": "", "phone": ""}
+        employer_name, employer_email, employer_phone = employer_data['name'], employer_data['email'], employer_data['phone']
+
+        final_contact_email = contact_email or employer_email
+
+        # 3. Validar que exista un email de destino
+        if not final_contact_email:
+            error_note = "Sin email de contacto del empleador."
+            cur.execute(
+                "UPDATE proposals SET status='error_email', notes=%s, cancelled_at=NOW() WHERE id=%s",
+                (error_note, proposal_id)
+            )
+            conn.commit()
+            logger.error(f"❗ Propuesta {proposal_id} falló: {error_note}")
+            send_admin_alert(
+                subject="Fallo en envío de Propuesta (Sin Email)",
+                details=f"La propuesta ID {proposal_id} para la oferta '{job_title}' (ID {job_id}) no pudo ser enviada porque no se encontró un email de contacto."
+            )
+            return
+
+        # 4. Construir contexto y enviar email
+        context = {
+            "applicant_name": applicant_name,
+            "applicant_email": applicant_email,
+            "job_title": job_title,
+            "employer_name": employer_name,
+            "cv_url": cv_url or "",
+        }
+        
+        send_proposal_to_employer(final_contact_email, context)
+        
+        final_contact_phone = contact_phone or employer_phone
+        if final_contact_phone:
+            logger.info(f"📲 (Simulado) WhatsApp a {final_contact_phone}: Nueva propuesta para «{job_title}».")
+
+        # 5. Actualizar estado a 'sent'
+        cur.execute("UPDATE proposals SET status='sent', sent_at=NOW() WHERE id=%s", (proposal_id,))
+        conn.commit()
+        logger.info(f"✅ Propuesta {proposal_id} enviada exitosamente a {final_contact_email}.")
+
+    except Exception as e:
+        if conn: conn.rollback()
+        logger.exception(f"Error crítico al procesar la propuesta {proposal_id}: {e}")
+        
+        try:
+            conn_err = db(); cur_err = conn_err.cursor()
+            cur_err.execute("UPDATE proposals SET status='error_send', notes=%s WHERE id=%s", (str(e)[:250], proposal_id))
+            conn_err.commit()
+        except Exception as db_err:
+            logger.error(f"Fallo al intentar marcar la propuesta {proposal_id} como errónea: {db_err}")
+        finally:
+            if 'cur_err' in locals() and cur_err: cur_err.close()
+            if 'conn_err' in locals() and conn_err: conn_err.close()
+
+        send_admin_alert(
+            subject="Fallo Crítico en Envío de Propuesta",
+            details=f"La función deliver() falló para la propuesta ID {proposal_id}.\nError: {e}"
+        )
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
 
 # ───────────────────────── Endpoints de la API ─────────────────────────────
+
+@router.post("/create", dependencies=[Depends(get_current_admin)])
+def create(data: dict, bg: BackgroundTasks):
+    job_id = data.get("job_id")
+    applicant_id = data.get("applicant_id")
+    if not job_id or not applicant_id:
+        raise HTTPException(status_code=400, detail="Faltan campos requeridos: job_id, applicant_id")
+
+    conn = cur = None
+    try:
+        conn = db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        cur.execute("SELECT id, status FROM proposals WHERE job_id = %s AND applicant_id = %s", (job_id, applicant_id))
+        existing = cur.fetchone()
+        if existing:
+            if existing['status'] == "cancelled":
+                cur.execute("DELETE FROM proposals WHERE id = %s", (existing['id'],))
+                logger.info(f"🗑️ Propuesta cancelada previa {existing['id']} eliminada.")
+            else:
+                raise HTTPException(status_code=409, detail="Ya has postulado a este empleo.")
+
+        cur.execute('SELECT label FROM "Job" WHERE id = %s', (job_id,))
+        label = (cur.fetchone() or {"label": "manual"})['label'] or "manual"
+        
+        status = "waiting" if label == "automatic" else "pending"
+        cur.execute(
+            "INSERT INTO proposals (job_id, applicant_id, label, status, created_at) VALUES (%s, %s, %s, %s, NOW()) RETURNING id",
+            (job_id, applicant_id, label, status)
+        )
+        proposal_id = cur.fetchone()['id']
+        conn.commit()
+        logger.info(f"🆕 Propuesta {proposal_id} creada con estado '{status}'.")
+
+        if label == "automatic":
+            bg.add_task(deliver, proposal_id, True)
+
+        cur.execute('SELECT title FROM "Job" WHERE id = %s', (job_id,))
+        job_title = cur.fetchone()['title']
+        cur.execute('SELECT name, email FROM "User" WHERE id = %s', (applicant_id,))
+        user_info = cur.fetchone()
+        
+        if user_info and user_info['email']:
+            context = {"applicant_name": user_info['name'], "job_title": job_title}
+            bg.add_task(send_cancellation_warning, user_info['email'], context)
+
+        return {"proposal_id": proposal_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn: conn.rollback()
+        logger.exception("Error al crear la propuesta.")
+        raise HTTPException(status_code=500, detail="Error interno al crear la propuesta.")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+@router.patch("/{proposal_id}/send", dependencies=[Depends(get_current_admin)])
+def send_manual(proposal_id: int, bg: BackgroundTasks):
+    conn = cur = None
+    try:
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE proposals SET status = 'sending' WHERE id = %s AND status = 'pending' RETURNING id",
+            (proposal_id,)
+        )
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Propuesta no encontrada o no está en estado 'pending'.")
+        conn.commit()
+        logger.info(f"Propuesta {proposal_id} marcada para envío manual inmediato.")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+    
+    bg.add_task(deliver, proposal_id, sleep_first=False)
+    return {"message": "Propuesta encolada para envío inmediato."}
+
+@router.post("/cancel", dependencies=[Depends(get_current_admin)])
+def cancel(data: dict):
+    proposal_id = data.get("proposal_id")
+    if not proposal_id:
+        raise HTTPException(status_code=400, detail="proposal_id requerido")
+
+    conn = cur = None
+    try:
+        conn = db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT status FROM proposals WHERE id = %s FOR UPDATE", (proposal_id,))
+        st = (cur.fetchone() or {}).get('status')
+        if st is None:
+            raise HTTPException(status_code=404, detail="La propuesta no existe.")
+        if st not in ("waiting", "pending"):
+            raise HTTPException(status_code=400, detail=f"No se puede cancelar una propuesta en estado '{st}'.")
+        
+        cur.execute("UPDATE proposals SET status='cancelled', cancelled_at=NOW() WHERE id=%s", (proposal_id,))
+        conn.commit()
+        logger.info(f"🚫 Propuesta {proposal_id} cancelada por el usuario.")
+        return {"message": "Postulación cancelada exitosamente."}
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+@router.delete("/{pid}", dependencies=[Depends(get_current_admin)])
+def delete_cancelled(pid: int):
+    conn = cur = None
+    try:
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM proposals WHERE id = %s AND status = 'cancelled' RETURNING id", (pid,))
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Propuesta no encontrada o no está en estado 'cancelled'.")
+        conn.commit()
+        logger.info(f"🗑️ Propuesta cancelada {pid} eliminada por un admin.")
+        return {"message": "Propuesta eliminada."}
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
 
 @router.get("/", dependencies=[Depends(get_current_admin)], summary="Listar todas las propuestas")
 def list_proposals():
@@ -95,24 +311,3 @@ def list_proposals():
     finally:
         if cur: cur.close()
         if conn: conn.close()
-
-# (El resto de los endpoints como /create, /cancel, etc. se mantienen igual)
-@router.post("/create")
-def create(data: dict, bg: BackgroundTasks):
-    # ... (lógica de creación)
-    pass
-
-@router.patch("/{proposal_id}/send", dependencies=[Depends(get_current_admin)])
-def send_manual(proposal_id: int, bg: BackgroundTasks):
-    # ... (lógica de envío manual)
-    pass
-
-@router.post("/cancel")
-def cancel(data: dict):
-    # ... (lógica de cancelación)
-    pass
-
-@router.delete("/{pid}", dependencies=[Depends(get_current_admin)])
-def delete_cancelled(pid: int):
-    # ... (lógica de eliminación)
-    pass
