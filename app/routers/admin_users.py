@@ -4,7 +4,8 @@ import json
 import psycopg2
 import re
 import io
-import datetime  # <--- IMPORTANTE: Se añade este import
+import datetime
+import logging
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from dotenv import load_dotenv
 from google.cloud import storage
@@ -13,13 +14,20 @@ from app.utils.auth_utils import get_current_admin
 from app.services.embedding import generate_file_embedding, get_db_connection
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/users", tags=["admin_users"])
 
 # Configurar Google Cloud Storage
-service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
-storage_client = storage.Client.from_service_account_info(service_account_info)
-BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
+try:
+    service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
+    storage_client = storage.Client.from_service_account_info(service_account_info)
+    BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
+except (json.JSONDecodeError, TypeError):
+    logger.error("Credenciales de Google Cloud no configuradas correctamente.")
+    storage_client = None
+    BUCKET_NAME = None
+
 
 def sanitize_filename(filename: str) -> str:
     filename = filename.replace(" ", "_")
@@ -46,12 +54,8 @@ def list_users(current_admin: str = Depends(get_current_admin)):
         users_list = []
         for u in users:
             user_obj = {
-                "id": u[0],
-                "email": u[1],
-                "name": u[2],
-                "phone": u[3],
-                "description": u[4],
-                "files": []
+                "id": u[0], "email": u[1], "name": u[2],
+                "phone": u[3], "description": u[4], "files": []
             }
             cur.execute('SELECT id, url, "originalName" FROM "EmployeeDocument" WHERE "userId" = %s', (u[0],))
             files = cur.fetchall()
@@ -63,6 +67,7 @@ def list_users(current_admin: str = Depends(get_current_admin)):
         return {"users": users_list}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.put("/{user_id}")
 def update_user(user_id: str, data: dict, current_admin: str = Depends(get_current_admin)):
@@ -90,30 +95,71 @@ def update_user(user_id: str, data: dict, current_admin: str = Depends(get_curre
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# --- FUNCIÓN CORREGIDA ---
 @router.delete("/{user_id}")
 def delete_user(user_id: str, current_admin: str = Depends(get_current_admin)):
     """
-    Elimina el usuario y sus datos asociados.
+    Elimina un usuario y todos sus datos asociados de forma segura y en el orden correcto.
     """
+    conn = None
+    cur = None
+    logger.info(f"Iniciando proceso de eliminación para el usuario ID: {user_id}")
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute('SELECT "fileKey", url FROM "EmployeeDocument" WHERE "userId" = %s', (user_id,))
-        files = cur.fetchall()
-        bucket = storage_client.bucket(BUCKET_NAME)
-        for f in files:
-            file_key = f[0]
-            blob = bucket.blob(file_key)
-            blob.delete()
+
+        # 1. Obtener todos los 'fileKey' de los documentos asociados al usuario.
+        cur.execute('SELECT "fileKey" FROM "EmployeeDocument" WHERE "userId" = %s', (user_id,))
+        files_to_delete = cur.fetchall()
+        file_keys = [f[0] for f in files_to_delete if f[0]]
+        
+        if file_keys:
+            logger.info(f"Se encontraron {len(file_keys)} archivos para eliminar.")
+            
+            # 2. Eliminar archivos de Google Cloud Storage
+            if storage_client and BUCKET_NAME:
+                bucket = storage_client.bucket(BUCKET_NAME)
+                for key in file_keys:
+                    try:
+                        blob = bucket.blob(key)
+                        blob.delete()
+                        logger.info(f"Archivo eliminado de GCS: {key}")
+                    except Exception as gcs_error:
+                        logger.error(f"No se pudo eliminar el archivo {key} de GCS: {gcs_error}")
+            
+            # 3. Eliminar los embeddings asociados a esos fileKeys
+            # Usamos 'ANY' para una eliminación eficiente de múltiples registros.
+            cur.execute('DELETE FROM "FileEmbedding" WHERE "fileKey" = ANY(%s)', (file_keys,))
+            logger.info(f"Embeddings eliminados para las claves: {file_keys}")
+
+        # 4. Eliminar los registros de 'EmployeeDocument'
         cur.execute('DELETE FROM "EmployeeDocument" WHERE "userId" = %s', (user_id,))
-        cur.execute('DELETE FROM file_embeddings WHERE user_id = %s', (user_id,))
+        logger.info(f"Registros de EmployeeDocument eliminados para el usuario {user_id}.")
+
+        # 5. Finalmente, eliminar el usuario de la tabla 'User'
+        # Esto solo funcionará si no hay OTRAS dependencias (como proposals, matches, etc.)
+        # Si las hay, se necesita ON DELETE CASCADE como discutimos.
         cur.execute('DELETE FROM "User" WHERE id = %s', (user_id,))
+        logger.info(f"Registro del usuario {user_id} eliminado de la tabla User.")
+        
         conn.commit()
-        cur.close()
-        conn.close()
-        return {"message": "Usuario y sus datos eliminados"}
+        logger.info(f"Proceso de eliminación completado exitosamente para el usuario {user_id}.")
+        return {"message": "Usuario y todos sus datos asociados han sido eliminados."}
+
+    except psycopg2.errors.ForeignKeyViolation as fk_error:
+        if conn: conn.rollback()
+        logger.error(f"Error de clave externa al eliminar usuario {user_id}: {fk_error}")
+        raise HTTPException(status_code=409, detail="No se puede eliminar el usuario porque tiene postulaciones u otra actividad registrada. Elimine esas dependencias primero.")
+    
     except Exception as e:
+        if conn: conn.rollback()
+        logger.exception(f"Error inesperado al eliminar el usuario {user_id}.")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
 
 @router.post("/{user_id}/files")
 def upload_user_file(user_id: str, file: UploadFile = File(...), current_admin: str = Depends(get_current_admin)):
