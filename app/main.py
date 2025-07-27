@@ -2,10 +2,8 @@
 
 import os
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
 import logging
 
 # --- Configuración del Logger ---
@@ -13,8 +11,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- Carga de Routers ---
+# Importamos cada módulo de router directamente.
 from app.routers import (
-    auth as public_auth,
+    auth,
     cv_confirm,
     cv_upload,
     files,
@@ -23,19 +22,15 @@ from app.routers import (
     webhooks,
     job,
     proposal,
-    apply as apply_router,
-    match as matchings_admin_router,
-    admin_templates as admin_templates_router,
-    # ... (Si faltan otros routers, asegúrate de importarlos)
+    apply,
+    match,
+    admin_templates,
+    # Asegúrate de que todos tus archivos de router estén importados aquí.
+    # Por ejemplo: admin_users, admin_config, etc.
 )
-# (Es posible que algunos routers como cv_processing, file_processing, etc.,
-# necesiten ser importados aquí si no están ya incluidos en otros módulos)
 
 # ─────────────────── Configuración de la App ───────────────────
 load_dotenv()
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM  = os.getenv("ALGORITHM", "HS256")
-
 app = FastAPI(
     title="FAP Mendoza API",
     docs_url="/docs",
@@ -43,6 +38,8 @@ app = FastAPI(
 )
 
 # ─────────────────── Middleware de CORS ───────────────────
+# Asegúrate de que tu variable de entorno FRONTEND_ORIGINS esté bien configurada.
+# Ejemplo: FRONTEND_ORIGINS="http://localhost:3000,https://fapmendoza.online"
 origins_env = os.getenv("FRONTEND_ORIGINS", "http://localhost:3000,https://fapmendoza.online")
 origins = [o.strip() for o in origins_env.split(",") if o.strip()]
 
@@ -63,28 +60,21 @@ async def log_request(request: Request, call_next):
     return response
 
 # ─────────────────── Inclusión de Routers ───────────────────
-# Nota: La convención es definir el prefijo dentro del APIRouter en cada archivo,
-# y no al incluirlo aquí, para evitar duplicados.
-
-# Routers Públicos
-app.include_router(public_auth.router)
+# Ahora incluimos el objeto 'router' de cada módulo importado.
+# Esto soluciona el error 'AttributeError: module has no attribute routes'.
+app.include_router(auth.router)
 app.include_router(cv_confirm.router)
 app.include_router(cv_upload.router)
 app.include_router(files.router)
 app.include_router(integration.router)
 app.include_router(users.router)
 app.include_router(webhooks.router)
-app.include_router(job.router) # Contiene endpoints públicos de jobs
-app.include_router(apply_router)
-
-# Routers de Administración (Protegidos)
-# La protección se define ahora dentro de cada router para mayor claridad.
+app.include_router(job.router)
+app.include_router(apply.router)
 app.include_router(proposal.router)
-app.include_router(matchings_admin_router)
-app.include_router(admin_templates_router)
-# app.include_router(admin_users.router) # Descomentar si tienes este router
-# ... (incluir otros routers de admin aquí)
-
+app.include_router(match.router)
+app.include_router(admin_templates.router)
+# ... (incluye aquí el .router de cada módulo de admin que falte)
 
 # ─────────────────── Endpoints de Raíz ───────────────────
 @app.get("/")
@@ -94,6 +84,7 @@ def home():
 @app.on_event("startup")
 def list_routes():
     url_list = [{"path": route.path, "name": route.name} for route in app.routes]
-    logger.info("✅ Rutas cargadas:")
+    logger.info("✅ Rutas cargadas exitosamente:")
     for route in url_list:
         logger.info(f"  - Path: {route['path']}")
+
