@@ -20,6 +20,8 @@ from psycopg2.extras import RealDictCursor
 from app.database import get_db_connection
 
 load_dotenv()
+# Configuración del logger para que muestre los mensajes en la consola
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # ────────────────────── Configuración y Constantes ──────────────────────
@@ -58,26 +60,43 @@ router = APIRouter(
     dependencies=[Depends(get_current_admin)],
 )
 
-# ───────────────────────── Lógica de la API ───────────────────────────
+# ───────────────────────── Lógica de la API con Diagnóstico ───────────────────────────
 
 @router.get("", summary="Listar todas las plantillas")
 def list_templates():
-    """Devuelve una lista de todas las plantillas, ordenadas por tipo y prioridad."""
+    """Devuelve una lista de todas las plantillas, con logs de diagnóstico."""
     conn = cur = None
+    logger.info(">>> INICIANDO PETICIÓN A: GET /api/admin/templates")
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute(
-            """
-            SELECT id, name, type, subject, body, is_default, created_at, updated_at
-              FROM proposal_templates
-             ORDER BY type, is_default DESC, updated_at DESC;
-            """
-        )
-        return {"templates": cur.fetchall()}
+        logger.info("Paso 1: Conexión a la base de datos exitosa.")
+
+        query = "SELECT id, name, type, subject, body, is_default, created_at, updated_at FROM proposal_templates ORDER BY type, is_default DESC;"
+        cur.execute(query)
+        logger.info("Paso 2: Consulta SQL ejecutada en 'proposal_templates'.")
+
+        templates = cur.fetchall()
+        
+        # --- DIAGNÓSTICO CLAVE ---
+        logger.info(f"Paso 3: La consulta devolvió {len(templates)} filas.")
+        
+        if templates:
+            logger.info(f"Primer resultado obtenido: {dict(templates[0])}")
+        else:
+            logger.warning("¡ATENCIÓN! La consulta no devolvió ninguna plantilla. Esto puede deberse a las políticas RLS de Supabase o a un problema de conexión.")
+            
+        return {"templates": templates}
+
+    except Exception as e:
+        logger.exception("!!! ERROR CATASTRÓFICO al listar plantillas.")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno al obtener las plantillas.")
+        
     finally:
         if cur: cur.close()
         if conn: conn.close()
+        logger.info("<<< FINALIZANDO PETICIÓN. Conexión a la base de datos cerrada.\n")
+
 
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Crear una nueva plantilla")
 async def create_template(request: Request):
@@ -97,7 +116,6 @@ async def create_template(request: Request):
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Si se marca como default, desmarcar las otras del mismo tipo
         if is_default:
             cur.execute("UPDATE proposal_templates SET is_default = FALSE WHERE type = %s;", (tpl_type,))
 
@@ -119,14 +137,10 @@ async def create_template(request: Request):
     finally:
         if cur: cur.close()
         if conn: conn.close()
-        
-# Los endpoints PUT, DELETE y set-default se mantienen con una lógica similar,
-# asegurando que operan sobre la tabla `proposal_templates`.
-# (Aquí iría la implementación completa de los otros endpoints)
+
 
 @router.put("/{tpl_id}", summary="Actualizar una plantilla existente")
 async def update_template(tpl_id: int, request: Request):
-    # Esta es una implementación de ejemplo, puedes completarla según tus necesidades.
     data = await request.json()
     name = data.get("name", "").strip()
     tpl_type = data.get("type", "").strip()
@@ -198,7 +212,7 @@ def set_default_template(tpl_id: int):
         
         tpl_type = row[0]
         
-        conn.autocommit = False # Iniciar transacción
+        conn.autocommit = False
         cur.execute("UPDATE proposal_templates SET is_default = FALSE WHERE type = %s;", (tpl_type,))
         cur.execute("UPDATE proposal_templates SET is_default = TRUE WHERE id = %s;", (tpl_id,))
         conn.commit()
