@@ -3,8 +3,8 @@
 Módulo para la confirmación de registro de usuarios a través de su CV.
 
 Este endpoint se activa cuando un usuario hace clic en el enlace de confirmación
-enviado a su email. Procesa el CV, extrae datos, crea el perfil de usuario
-y envía las credenciales de acceso.
+enviado a su email. Procesa el CV, extrae datos, crea el perfil de usuario,
+REGISTRA EL DOCUMENTO, y envía las credenciales de acceso.
 """
 import io
 import random
@@ -71,7 +71,6 @@ def extract_text_from_pdf(pdf_bytes):
         logger.error(f"Error extrayendo texto del PDF: {e}")
         return ""
 
-# ... (Otras funciones de extracción como extract_phone, extract_name, etc. se mantienen igual)
 def extract_phone(text):
     phones = re.findall(r"\+?\d[\d\s\-]{8,}", text)
     return phones[0] if phones else None
@@ -121,7 +120,7 @@ async def confirm_email(code: str = Query(...), bg: BackgroundTasks = Background
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(old_path)
         if not blob.exists():
-             raise HTTPException(status_code=404, detail="El archivo del CV no fue encontrado en el bucket de pendientes.")
+                raise HTTPException(status_code=404, detail="El archivo del CV no fue encontrado en el bucket de pendientes.")
         new_blob = bucket.rename_blob(blob, new_path)
         new_cv_url = new_blob.public_url
         logger.info(f"✅ CV movido a: {new_path}")
@@ -156,6 +155,22 @@ async def confirm_email(code: str = Query(...), bg: BackgroundTasks = Background
         )
         user_id = cur.fetchone()[0]
 
+        # --- ¡ESTA ES LA CORRECCIÓN CLAVE! ---
+        # Ahora que tenemos el user_id, creamos el registro del documento.
+        original_filename = os.path.basename(new_path) # Usamos el nombre del archivo en GCS
+        file_key = new_path # La clave del archivo es la ruta completa en GCS
+
+        logger.info(f"📝 Registrando documento en EmployeeDocument para el usuario {user_id}...")
+        cur.execute(
+            """
+            INSERT INTO "EmployeeDocument" ("originalName", "fileKey", "userId")
+            VALUES (%s, %s, %s)
+            """,
+            (original_filename, file_key, user_id)
+        )
+        logger.info(f"✅ Documento '{original_filename}' registrado exitosamente.")
+        # --- FIN DE LA CORRECCIÓN ---
+
         # Limpiar registro pendiente
         cur.execute("DELETE FROM pending_users WHERE email = %s", (user_email,))
         conn.commit()
@@ -168,7 +183,7 @@ async def confirm_email(code: str = Query(...), bg: BackgroundTasks = Background
         return {"message": "¡Cuenta confirmada exitosamente! Recibirás un correo con tus credenciales en breve."}
 
     except HTTPException:
-        raise # Re-lanza las excepciones HTTP para que FastAPI las maneje
+        raise
     except Exception as e:
         if conn: conn.rollback()
         logger.exception(f"❌ Error crítico confirmando cuenta para el código {code[:8]}: {e}")
