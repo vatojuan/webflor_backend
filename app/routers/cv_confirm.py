@@ -155,18 +155,18 @@ async def confirm_email(code: str = Query(...), bg: BackgroundTasks = Background
         )
         user_id = cur.fetchone()[0]
 
-        # --- ¡ESTA ES LA CORRECCIÓN CLAVE! ---
-        # Ahora que tenemos el user_id, creamos el registro del documento.
-        original_filename = os.path.basename(new_path) # Usamos el nombre del archivo en GCS
-        file_key = new_path # La clave del archivo es la ruta completa en GCS
+        # --- ¡ESTA ES LA CORRECCIÓN FINAL! ---
+        # Ahora que tenemos el user_id, creamos el registro del documento incluyendo la URL.
+        original_filename = os.path.basename(new_path)
+        file_key = new_path
 
         logger.info(f"📝 Registrando documento en EmployeeDocument para el usuario {user_id}...")
         cur.execute(
             """
-            INSERT INTO "EmployeeDocument" ("originalName", "fileKey", "userId")
-            VALUES (%s, %s, %s)
+            INSERT INTO "EmployeeDocument" ("originalName", "fileKey", "userId", "url")
+            VALUES (%s, %s, %s, %s)
             """,
-            (original_filename, file_key, user_id)
+            (original_filename, file_key, user_id, new_cv_url) # Se añade new_cv_url aquí
         )
         logger.info(f"✅ Documento '{original_filename}' registrado exitosamente.")
         # --- FIN DE LA CORRECCIÓN ---
