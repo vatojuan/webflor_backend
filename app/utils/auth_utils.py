@@ -3,10 +3,20 @@ import psycopg2
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
+from pydantic import BaseModel
 
-# Importa el modelo de usuario y la conexión a la BD
-from app.schemas import UserInDB  # Asegúrate de que la ruta sea correcta
-from app.routers.auth import get_db_connection # Reutilizamos la conexión del router de auth
+# Reutilizamos la conexión a la BD desde el router de autenticación
+from app.routers.auth import get_db_connection
+
+# --- Definición del Modelo Pydantic ---
+# Se define el modelo aquí para evitar errores de importación circular.
+class UserInDB(BaseModel):
+    id: int
+    email: str
+    role: str
+
+    class Config:
+        from_attributes = True # Reemplaza a orm_mode=True en Pydantic v1
 
 # --- Configuración de Seguridad ---
 SECRET_KEY = os.getenv("SECRET_KEY", "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12")
@@ -17,7 +27,7 @@ ALGORITHM = os.getenv("ALGORITHM", "HS256")
 oauth2_scheme_user = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 # --- Función Base para Obtener Usuario desde Token ---
-# Esta función centraliza la lógica de decodificación y búsqueda en la BD.
+# Esta función centraliza la lógica de decodificar el token y buscar en la BD.
 def get_current_user_from_token(token: str) -> UserInDB:
     """
     Decodifica un token JWT, extrae el ID de usuario (sub), busca al usuario
@@ -60,7 +70,8 @@ def get_current_admin(token: str = Depends(OAuth2PasswordBearer(tokenUrl="/auth/
     Verifica que el token pertenezca a un usuario que es administrador.
     """
     user = get_current_user_from_token(token)
-    if user.role != "admin": # Asumiendo que el rol se llama 'admin'
+    # Asumiendo que el rol en la base de datos se llama 'admin'
+    if user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="El usuario no tiene permisos de administrador"
@@ -68,11 +79,11 @@ def get_current_admin(token: str = Depends(OAuth2PasswordBearer(tokenUrl="/auth/
     return user
 
 
-# === FUNCIÓN NUEVA que resuelve tu error ===
+# === FUNCIÓN NUEVA que resuelve tu error de despliegue ===
 def get_current_active_user(token: str = Depends(oauth2_scheme_user)) -> UserInDB:
     """
-    Dependencia de FastAPI para obtener el usuario activo actual a partir de un token.
-    Esta es la función que tu router de 'training' necesita.
+    Dependencia de FastAPI para obtener el usuario activo actual desde un token.
+    Esta es la función que el router de 'training' necesita.
     """
     user = get_current_user_from_token(token)
     # Aquí podrías añadir más validaciones, como si el usuario está activo o confirmado.
