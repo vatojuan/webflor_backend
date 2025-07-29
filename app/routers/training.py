@@ -84,6 +84,54 @@ def upload_lesson(
     conn.close()
     return {"message": "Lección añadida exitosamente", "videoUrl": video_url}
 
+# --- NUEVO ENDPOINT DE ADMIN PARA VER CURSOS ---
+@router.get("/admin/courses")
+def admin_list_courses(current_admin: UserInDB = Depends(get_current_admin)):
+    """
+    Devuelve una lista de todos los cursos con el número de estudiantes inscritos.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    query = """
+    SELECT c.id, c.title, c.description, c."imageUrl", COUNT(e.id) as student_count
+    FROM "Course" c
+    LEFT JOIN "Enrollment" e ON c.id = e."courseId"
+    GROUP BY c.id
+    ORDER BY c."createdAt" DESC;
+    """
+    cur.execute(query)
+    courses = [
+        {"id": row[0], "title": row[1], "description": row[2], "imageUrl": row[3], "studentCount": row[4]}
+        for row in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return courses
+
+# --- NUEVO ENDPOINT DE ADMIN PARA VER INSCRIPCIONES ---
+@router.get("/admin/courses/{course_id}/enrollments")
+def admin_get_enrollments(course_id: uuid.UUID, current_admin: UserInDB = Depends(get_current_admin)):
+    """
+    Devuelve los detalles de los usuarios inscritos en un curso específico.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    query = """
+    SELECT u.name, u.email, e.progress
+    FROM "Enrollment" e
+    JOIN "User" u ON e."userId" = u.id
+    WHERE e."courseId" = %s
+    ORDER BY u.name;
+    """
+    cur.execute(query, (str(course_id),))
+    enrollments = [
+        {"name": row[0], "email": row[1], "progress": row[2]}
+        for row in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return enrollments
+
 # ===============================================================
 # ===================== ENDPOINTS PARA USUARIOS =================
 # ===============================================================
