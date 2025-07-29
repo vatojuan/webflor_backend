@@ -6,13 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form
 from typing import List
 from google.cloud import storage
 
-# Reutiliza tus utilidades existentes
-from app.utils.auth_utils import get_current_admin, get_current_active_user # Necesitarás ambos
-from app.services.embedding import get_db_connection # Asumiendo que esta es tu función de conexión
-from app.models import User # Asumiendo que tienes un modelo Pydantic para User
+# --- Importaciones Corregidas ---
+# Reutiliza tus utilidades existentes y el modelo UserInDB que ya definimos
+from app.utils.auth_utils import get_current_admin, get_current_active_user, UserInDB
+from app.routers.auth import get_db_connection
 
-# --- Reutiliza tu configuración de Google Cloud Storage ---
-# (Copia la configuración de storage_client y BUCKET_NAME de admin_users.py)
+# --- Configuración de Google Cloud Storage ---
 try:
     service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
     storage_client = storage.Client.from_service_account_info(service_account_info)
@@ -21,7 +20,7 @@ except (json.JSONDecodeError, TypeError):
     storage_client = None
     BUCKET_NAME = None
 
-router = APIRouter(prefix="/training", tags=["Training"])
+router = APIRouter(prefix="/training", tags=["Formación"])
 
 # ===============================================================
 # ================== ENDPOINTS PARA ADMINISTRADORES ==============
@@ -31,13 +30,13 @@ router = APIRouter(prefix="/training", tags=["Training"])
 def create_course(
     title: str = Form(...),
     description: str = Form(...),
-    image: UploadFile = File(None), # Imagen de portada opcional
-    current_admin: User = Depends(get_current_admin)
+    image: UploadFile = File(None),
+    # Usamos el modelo UserInDB para el tipado
+    current_admin: UserInDB = Depends(get_current_admin)
 ):
     """Crea un nuevo curso. Solo para administradores."""
     image_url = None
     if image and storage_client:
-        # Lógica para subir la imagen de portada
         image_blob_name = f"course-images/{uuid.uuid4()}-{image.filename}"
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(image_blob_name)
@@ -62,7 +61,7 @@ def upload_lesson(
     title: str = Form(...),
     order_index: int = Form(...),
     video: UploadFile = File(...),
-    current_admin: User = Depends(get_current_admin)
+    current_admin: UserInDB = Depends(get_current_admin)
 ):
     """Sube un video como una lección para un curso existente."""
     if not storage_client:
@@ -90,14 +89,13 @@ def upload_lesson(
 # ===============================================================
 
 @router.get("/courses")
-def list_all_courses(current_user: User = Depends(get_current_active_user)):
+def list_all_courses(current_user: UserInDB = Depends(get_current_active_user)):
     """
     Devuelve todos los cursos. Para cada curso, indica si el usuario actual
     está inscrito y cuál es su progreso.
     """
     conn = get_db_connection()
     cur = conn.cursor()
-    # Esta consulta usa un LEFT JOIN para traer los datos de inscripción si existen
     query = """
     SELECT c.id, c.title, c.description, c."imageUrl",
            e.id IS NOT NULL as "isEnrolled",
@@ -118,7 +116,7 @@ def list_all_courses(current_user: User = Depends(get_current_active_user)):
     return courses
 
 @router.post("/enroll/{course_id}")
-def enroll_in_course(course_id: uuid.UUID, current_user: User = Depends(get_current_active_user)):
+def enroll_in_course(course_id: uuid.UUID, current_user: UserInDB = Depends(get_current_active_user)):
     """Inscribe al usuario actual en un curso."""
     conn = get_db_connection()
     cur = conn.cursor()
@@ -135,5 +133,3 @@ def enroll_in_course(course_id: uuid.UUID, current_user: User = Depends(get_curr
         cur.close()
         conn.close()
     return {"message": "Inscripción exitosa"}
-
-# (Aquí irían más endpoints como el de completar lección, ver detalles de un curso, etc.)
