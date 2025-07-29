@@ -35,7 +35,7 @@ def get_db_connection():
             user=os.getenv("USER", "postgres.apnfioxjddccokgkljvd"),
             password=os.getenv("PASSWORD", "Pachamama190"),
             host=os.getenv("HOST", "aws-0-sa-east-1.pooler.supabase.com"),
-            port=5432,  # Fijo en 5432
+            port=5432,
             sslmode="require"
         )
         register_vector(conn)
@@ -179,7 +179,6 @@ def run_regeneration_for_all_users():
         if conn: conn.close()
         print("\n🏁 TAREA DE REGENERACIÓN DE PERFILES FINALIZADA 🏁")
 
-# --- CORRECCIÓN FINAL: Asegurarse que la ruta termina en / ---
 @router.post("/regenerate-all-profiles/")
 async def regenerate_all_profiles(background_tasks: BackgroundTasks):
     """
@@ -191,7 +190,6 @@ async def regenerate_all_profiles(background_tasks: BackgroundTasks):
     return {"message": "El proceso de regeneración de perfiles ha comenzado en segundo plano. Revisa los logs del servidor para ver el progreso."}
 
 
-# --- CORRECCIÓN FINAL: Asegurarse que la ruta termina en / ---
 @router.get("/confirm/")
 async def confirm_email(code: str = Query(...)):
     conn = None
