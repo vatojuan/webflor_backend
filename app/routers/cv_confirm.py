@@ -90,20 +90,18 @@ def sanitize_filename(filename: str) -> str:
     filename = re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
     return filename
 
-# --- NUEVA FUNCIÓN PARA REGENERAR PERFILES ---
 def run_regeneration_for_all_users():
     """
     Tarea en segundo plano para regenerar los perfiles de todos los usuarios
     a partir de sus CVs existentes.
     """
-    print("🚀 INICIANDO TAREA DE REGENERACIÓN DE PERFILES PARA TODOS LOS USUARIOS �")
+    print("🚀 INICIANDO TAREA DE REGENERACIÓN DE PERFILES PARA TODOS LOS USUARIOS 🚀")
     conn = None
     cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # 1. Obtener todos los usuarios que tienen un CV
         cur.execute('SELECT id, email, "cvUrl" FROM "User" WHERE "cvUrl" IS NOT NULL')
         users = cur.fetchall()
         print(f"👥 Se encontraron {len(users)} usuarios para procesar.")
@@ -114,7 +112,6 @@ def run_regeneration_for_all_users():
             try:
                 print(f"\n--- 🔄 Procesando usuario ID: {user_id}, Email: {user_email} ---")
                 
-                # 2. Descargar el CV desde GCS
                 if not cv_url or not cv_url.startswith(f"https://storage.googleapis.com/{BUCKET_NAME}/"):
                     print(f"⚠️ URL de CV inválida o ausente para el usuario {user_id}. Saltando.")
                     continue
@@ -129,7 +126,6 @@ def run_regeneration_for_all_users():
                 file_bytes = blob.download_as_bytes()
                 print(f"✅ CV descargado desde: {cv_url}")
 
-                # 3. Extraer texto y datos
                 text_content = extract_text_from_pdf(file_bytes)
                 if not text_content:
                     print(f"⚠️ No se pudo extraer texto del CV para el usuario {user_id}. Saltando.")
@@ -138,7 +134,6 @@ def run_regeneration_for_all_users():
                 phone_number = extract_phone(text_content)
                 print(f"✅ Nuevo teléfono extraído: {phone_number}")
 
-                # 4. Generar nueva descripción con la lógica mejorada
                 description_prompt = [
                     {
                         "role": "system",
@@ -162,12 +157,10 @@ def run_regeneration_for_all_users():
                 description = description_response.choices[0].message.content.strip()
                 print(f"✅ Nueva descripción generada ({len(description)} caracteres).")
 
-                # 5. Generar nuevo embedding para la descripción
                 embedding_response_desc = client.embeddings.create(model="text-embedding-ada-002", input=description)
                 embedding_desc = embedding_response_desc.data[0].embedding
                 print("✅ Nuevo embedding de descripción generado.")
 
-                # 6. Actualizar el usuario en la base de datos (SIN TOCAR LA CONTRASEÑA)
                 cur.execute(
                     'UPDATE "User" SET description = %s, phone = %s, embedding = %s WHERE id = %s',
                     (description, phone_number, embedding_desc, user_id)
@@ -177,7 +170,7 @@ def run_regeneration_for_all_users():
 
             except Exception as e:
                 print(f"❌ ERROR procesando al usuario {user_id} ({user_email}): {e}")
-                conn.rollback() # Revertir cambios para este usuario si algo falla
+                conn.rollback() 
 
     except Exception as e:
         print(f"❌❌ ERROR CRÍTICO durante la tarea de regeneración: {e}")
@@ -186,7 +179,8 @@ def run_regeneration_for_all_users():
         if conn: conn.close()
         print("\n🏁 TAREA DE REGENERACIÓN DE PERFILES FINALIZADA 🏁")
 
-@router.post("/regenerate-all-profiles")
+# --- CORRECCIÓN FINAL: Asegurarse que la ruta termina en / ---
+@router.post("/regenerate-all-profiles/")
 async def regenerate_all_profiles(background_tasks: BackgroundTasks):
     """
     Endpoint para administradores. Inicia una tarea en segundo plano para
@@ -197,8 +191,8 @@ async def regenerate_all_profiles(background_tasks: BackgroundTasks):
     return {"message": "El proceso de regeneración de perfiles ha comenzado en segundo plano. Revisa los logs del servidor para ver el progreso."}
 
 
-# --- ENDPOINT DE CONFIRMACIÓN DE EMAIL EXISTENTE ---
-@router.get("/confirm")
+# --- CORRECCIÓN FINAL: Asegurarse que la ruta termina en / ---
+@router.get("/confirm/")
 async def confirm_email(code: str = Query(...)):
     conn = None
     cur = None
@@ -254,7 +248,6 @@ async def confirm_email(code: str = Query(...)):
             name_from_cv = user_email.split("@")[0]
         print(f"✅ Nombre extraído con OpenAI: {name_from_cv}")
 
-        # --- INICIO DEL BLOQUE MEJORADO ---
         print("🧠 Iniciando generación de descripción profesional y adaptativa...")
         description_prompt = [
             {
@@ -285,7 +278,6 @@ async def confirm_email(code: str = Query(...)):
             else:
                 description = description[:997] + "..."
         print(f"✅ Descripción generada ({len(description)} caracteres): {description}")
-        # --- FIN DEL BLOQUE MEJORADO ---
 
         embedding_response = client.embeddings.create(model="text-embedding-ada-002", input=text_content)
         embedding_cv = embedding_response.data[0].embedding
