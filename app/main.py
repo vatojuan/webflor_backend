@@ -1,5 +1,3 @@
-# main.py
-
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -11,7 +9,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- Carga de Routers ---
-# Importamos cada módulo de router directamente.
 from app.routers import (
     auth,
     cv_confirm,
@@ -31,13 +28,10 @@ from app.routers import (
     email_db_admin,
     job_admin,
     training,
-    # Asegúrate de que todos tus archivos de router estén importados aquí.
 )
-# Importamos el router de autenticación de admin desde su ubicación específica
 from backend.auth import router as admin_auth_router
 
-
-# ─────────────────── Configuración de la App ───────────────────
+# --- Configuración de la App ---
 load_dotenv()
 app = FastAPI(
     title="FAP Mendoza API",
@@ -45,9 +39,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# ─────────────────── Middleware de CORS ───────────────────
-# Asegúrate de que tu variable de entorno FRONTEND_ORIGINS esté bien configurada.
-# Ejemplo: FRONTEND_ORIGINS="http://localhost:3000,https://fapmendoza.online"
+# --- Middleware de CORS ---
 origins_env = os.getenv("FRONTEND_ORIGINS", "http://localhost:3000,https://fapmendoza.online")
 origins = [o.strip() for o in origins_env.split(",") if o.strip()]
 
@@ -59,7 +51,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─────────────────── Middleware de Logging ───────────────────
+# --- Middleware de Logging ---
 @app.middleware("http")
 async def log_request(request: Request, call_next):
     logger.info(f"📥 {request.method} {request.url.path}")
@@ -67,33 +59,34 @@ async def log_request(request: Request, call_next):
     logger.info(f"📤 {response.status_code}")
     return response
 
-# ─────────────────── Inclusión de Routers ───────────────────
-# Ahora incluimos el objeto 'router' de cada módulo importado.
-# Esto soluciona el error 'AttributeError: module has no attribute routes'.
+# --- Inclusión de Routers ---
+
+# CORRECCIÓN: Se añade el prefijo /api a los routers que lo necesitan.
+# Esto asegura que la ruta final sea /api/cv/regenerate-all-profiles/
+app.include_router(cv_confirm.router, prefix="/api") 
+app.include_router(cv_upload.router, prefix="/api")
+app.include_router(job.router, prefix="/api")
+app.include_router(apply.router, prefix="/api")
+app.include_router(proposal.router, prefix="/api")
+app.include_router(match.router, prefix="/api")
+app.include_router(admin_templates.router, prefix="/api")
+app.include_router(admin_config.router, prefix="/api")
+app.include_router(email_db_admin.router, prefix="/api")
+app.include_router(job_admin.router, prefix="/api")
+
+# Routers que no necesitan el prefijo /api
 app.include_router(auth.router)
-app.include_router(cv_confirm.router)
-app.include_router(cv_upload.router)
 app.include_router(files.router)
 app.include_router(integration.router)
 app.include_router(users.router)
 app.include_router(webhooks.router)
-app.include_router(job.router)
-app.include_router(apply.router)
-app.include_router(proposal.router)
-app.include_router(match.router)
-app.include_router(admin_templates.router)
 app.include_router(admin_users.router)
-app.include_router(admin_config.router)
 app.include_router(cv_admin_upload.router)
-app.include_router(email_db_admin.router)
-app.include_router(job_admin.router)
 app.include_router(training.router)
-
-# Incluimos el router de login de admin con su prefijo
 app.include_router(admin_auth_router, prefix="/auth", tags=["admin"])
 
 
-# ─────────────────── Endpoints de Raíz ───────────────────
+# --- Endpoints de Raíz ---
 @app.get("/")
 def home():
     return {"ok": True, "message": "API de FAP Mendoza funcionando."}
@@ -104,3 +97,4 @@ def list_routes():
     logger.info("✅ Rutas cargadas exitosamente:")
     for route in url_list:
         logger.info(f"  - Path: {route['path']}")
+
