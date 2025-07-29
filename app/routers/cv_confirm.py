@@ -49,7 +49,7 @@ def generate_secure_password(length=12):
     hashed = bcrypt.hashpw(plain_password.encode('utf-8'), bcrypt.gensalt())
     return plain_password, hashed.decode('utf-8')
 
-router = APIRouter(prefix="/cv", tags=["cv"])
+router = APIRouter(tags=["cv"])
 
 def extract_text_from_pdf(pdf_bytes):
     """Extrae el texto completo de un PDF dado en bytes."""
@@ -60,10 +60,28 @@ def extract_text_from_pdf(pdf_bytes):
     except Exception as e:
         raise Exception(f"Error extrayendo texto del PDF: {e}")
 
+# --- FUNCIÓN MEJORADA PARA EXTRAER TELÉFONO ---
 def extract_phone(text):
-    """Extrae un número de teléfono si se encuentra."""
-    phones = re.findall(r"\+?\d[\d\s\-]{8,}", text)
-    return phones[0] if phones else None
+    """
+    Extrae un número de teléfono de forma más inteligente, evitando confundirlo con fechas.
+    Busca secuencias de números y verifica que tengan una cantidad mínima de dígitos.
+    """
+    # Expresión regular para encontrar posibles candidatos a números de teléfono.
+    # Busca secuencias de 9 a 20 caracteres que incluyan dígitos, espacios, guiones, paréntesis y el signo +.
+    potential_phones = re.findall(r'[\d\s\-\(\)\+]{9,20}', text)
+    
+    for candidate in potential_phones:
+        # Elimina todo lo que no sea un dígito para contarlos.
+        digits_only = re.sub(r'\D', '', candidate)
+        
+        # Un número de teléfono real debería tener más de 8 dígitos.
+        # Esto ayuda a descartar fechas como 'dd-mm-yyyy' (8 dígitos) o 'dd/mm/yy' (6 dígitos).
+        if len(digits_only) > 8:
+            # Si cumple la condición, devolvemos el candidato con su formato original.
+            return candidate.strip()
+            
+    # Si no se encuentra ningún candidato adecuado, devuelve None.
+    return None
 
 def extract_name(text):
     """
@@ -131,6 +149,7 @@ def run_regeneration_for_all_users():
                     print(f"⚠️ No se pudo extraer texto del CV para el usuario {user_id}. Saltando.")
                     continue
                 
+                # Se utiliza la nueva función mejorada
                 phone_number = extract_phone(text_content)
                 print(f"✅ Nuevo teléfono extraído: {phone_number}")
 
@@ -179,7 +198,7 @@ def run_regeneration_for_all_users():
         if conn: conn.close()
         print("\n🏁 TAREA DE REGENERACIÓN DE PERFILES FINALIZADA 🏁")
 
-@router.post("/regenerate-all-profiles/")
+@router.post("/cv/regenerate-all-profiles/")
 async def regenerate_all_profiles(background_tasks: BackgroundTasks):
     """
     Endpoint para administradores. Inicia una tarea en segundo plano para
@@ -190,7 +209,7 @@ async def regenerate_all_profiles(background_tasks: BackgroundTasks):
     return {"message": "El proceso de regeneración de perfiles ha comenzado en segundo plano. Revisa los logs del servidor para ver el progreso."}
 
 
-@router.get("/confirm/")
+@router.get("/cv/confirm/")
 async def confirm_email(code: str = Query(...)):
     conn = None
     cur = None
@@ -238,6 +257,7 @@ async def confirm_email(code: str = Query(...)):
         print(f"✅ Texto del CV obtenido (total de {len(text_content)} caracteres)")
         print(f"🔎 Fragmento inicial del texto:\n{text_content[:500]}")
 
+        # Se utiliza la nueva función mejorada
         phone_number = extract_phone(text_content)
         print(f"✅ Teléfono extraído: {phone_number}")
         name_from_cv = extract_name(text_content)
