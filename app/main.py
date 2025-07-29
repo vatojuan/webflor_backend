@@ -30,6 +30,7 @@ from app.routers import (
     cv_admin_upload,
     email_db_admin,
     job_admin,
+    training,
     # Asegúrate de que todos tus archivos de router estén importados aquí.
 )
 # Importamos el router de autenticación de admin desde su ubicación específica
@@ -86,6 +87,7 @@ app.include_router(admin_config.router)
 app.include_router(cv_admin_upload.router)
 app.include_router(email_db_admin.router)
 app.include_router(job_admin.router)
+app.include_router(training.router)
 
 # Incluimos el router de login de admin con su prefijo
 app.include_router(admin_auth_router, prefix="/auth", tags=["admin"])
