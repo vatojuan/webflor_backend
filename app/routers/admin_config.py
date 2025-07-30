@@ -37,9 +37,9 @@ def get_db_connection():
         raise HTTPException(500, f"Error en la conexión a la BD: {e}")
 
 # --- CORRECCIÓN ---
-# Se quita "/api" del prefijo. main.py se encargará de añadirlo.
+# Se restaura el prefijo completo "/api/admin/config" para que funcione con la lógica original de main.py
 router = APIRouter(
-    prefix="/admin/config",
+    prefix="/api/admin/config",
     tags=["admin_config"],
     dependencies=[Depends(get_current_admin)]
 )
