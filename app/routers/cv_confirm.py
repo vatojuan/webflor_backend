@@ -110,7 +110,7 @@ def run_regeneration_for_all_users():
     """
     Tarea en segundo plano para regenerar los perfiles de todos los usuarios.
     """
-    print("🚀 INICIANDO TAREA DE REGENERACIÓN DE PERFILES PARA TODOS LOS USUARIOS �")
+    print("🚀 INICIANDO TAREA DE REGENERACIÓN DE PERFILES PARA TODOS LOS USUARIOS 🚀")
     conn = None
     cur = None
     try:
