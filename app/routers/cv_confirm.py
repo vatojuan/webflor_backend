@@ -49,9 +49,9 @@ def generate_secure_password(length=12):
     hashed = bcrypt.hashpw(plain_password.encode('utf-8'), bcrypt.gensalt())
     return plain_password, hashed.decode('utf-8')
 
-# --- CORRECCIÓN DEFINITIVA ---
-# 1. Se define el prefijo completo aquí para que coincida con la llamada del frontend (/api/cv/...)
-router = APIRouter(prefix="/api/cv", tags=["cv"])
+# --- CORRECCIÓN ---
+# Se quita "/api" del prefijo. main.py se encargará de añadirlo.
+router = APIRouter(prefix="/cv", tags=["cv"])
 
 def extract_text_from_pdf(pdf_bytes):
     """Extrae el texto completo de un PDF dado en bytes."""
@@ -62,7 +62,6 @@ def extract_text_from_pdf(pdf_bytes):
     except Exception as e:
         raise Exception(f"Error extrayendo texto del PDF: {e}")
 
-# --- FUNCIÓN MEJORADA PARA EXTRAER TELÉFONO ---
 def extract_phone(text):
     """
     Extrae un número de teléfono de forma más inteligente, evitando confundirlo con fechas.
@@ -168,7 +167,6 @@ def run_regeneration_for_all_users():
         if conn: conn.close()
         print("\n🏁 TAREA DE REGENERACIÓN DE PERFILES FINALIZADA 🏁")
 
-# 2. Las rutas ahora son relativas al prefijo (ya no necesitan /cv/)
 @router.post("/regenerate-all-profiles/")
 async def regenerate_all_profiles(background_tasks: BackgroundTasks):
     """
@@ -178,7 +176,6 @@ async def regenerate_all_profiles(background_tasks: BackgroundTasks):
     background_tasks.add_task(run_regeneration_for_all_users)
     return {"message": "El proceso de regeneración de perfiles ha comenzado en segundo plano. Revisa los logs del servidor para ver el progreso."}
 
-# 2. Las rutas ahora son relativas al prefijo (ya no necesitan /cv/)
 @router.get("/confirm/")
 async def confirm_email(code: str = Query(...)):
     """

@@ -1,5 +1,3 @@
-# app/routers/admin_config.py
-
 import os
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer
@@ -38,8 +36,10 @@ def get_db_connection():
     except Exception as e:
         raise HTTPException(500, f"Error en la conexión a la BD: {e}")
 
+# --- CORRECCIÓN ---
+# Se quita "/api" del prefijo. main.py se encargará de añadirlo.
 router = APIRouter(
-    prefix="/api/admin/config",
+    prefix="/admin/config",
     tags=["admin_config"],
     dependencies=[Depends(get_current_admin)]
 )
