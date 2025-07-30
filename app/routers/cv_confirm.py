@@ -50,8 +50,8 @@ def generate_secure_password(length=12):
     return plain_password, hashed.decode('utf-8')
 
 # --- CORRECCIÓN ---
-# Se quita "/api" del prefijo. main.py se encargará de añadirlo.
-router = APIRouter(prefix="/cv", tags=["cv"])
+# Se restaura el prefijo completo "/api/cv" para que funcione con la lógica original de main.py
+router = APIRouter(prefix="/api/cv", tags=["cv"])
 
 def extract_text_from_pdf(pdf_bytes):
     """Extrae el texto completo de un PDF dado en bytes."""
