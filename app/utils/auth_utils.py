@@ -9,29 +9,25 @@ from pydantic import BaseModel
 from app.routers.auth import get_db_connection
 
 # --- Definición del Modelo Pydantic ---
-# Se define el modelo aquí para evitar errores de importación circular.
 class UserInDB(BaseModel):
     id: int
     email: str
     role: str
 
     class Config:
-        from_attributes = True # Reemplaza a orm_mode=True en Pydantic v1
+        from_attributes = True # Reemplaza a orm_mode=True
 
 # --- Configuración de Seguridad ---
 SECRET_KEY = os.getenv("SECRET_KEY", "A5DD9F4F87075741044F604C552C31ED32E5BD246066A765A4D18DE8D8D83F12")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 
-# Creamos un esquema de autenticación para los usuarios normales.
-# Apunta al endpoint de login que ya tienes en auth.py
 oauth2_scheme_user = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-# --- Función Base para Obtener Usuario desde Token ---
-# Esta función centraliza la lógica de decodificar el token y buscar en la BD.
+# --- Función Base para Obtener Usuario desde Token (CORREGIDA) ---
 def get_current_user_from_token(token: str) -> UserInDB:
     """
-    Decodifica un token JWT, extrae el ID de usuario (sub), busca al usuario
-    en la base de datos y devuelve un objeto UserInDB.
+    Decodifica un token JWT, extrae el identificador (sub), y busca al usuario
+    en la base de datos, ya sea por ID numérico o por email.
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -40,8 +36,8 @@ def get_current_user_from_token(token: str) -> UserInDB:
     )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: str = payload.get("sub")
-        if user_id is None:
+        user_identifier: str = payload.get("sub")
+        if user_identifier is None:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
@@ -51,12 +47,24 @@ def get_current_user_from_token(token: str) -> UserInDB:
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute('SELECT id, email, role FROM "User" WHERE id = %s', (int(user_id),))
+
+        # --- LÓGICA CORREGIDA ---
+        # Intentamos convertir el identificador a un entero.
+        # Si funciona, buscamos por ID. Si falla, es un email y buscamos por email.
+        try:
+            user_id = int(user_identifier)
+            query = 'SELECT id, email, role FROM "User" WHERE id = %s'
+            params = (user_id,)
+        except ValueError:
+            query = 'SELECT id, email, role FROM "User" WHERE email = %s'
+            params = (user_identifier,)
+        
+        cur.execute(query, params)
         user_data = cur.fetchone()
+        
         if user_data is None:
             raise credentials_exception
         
-        # Creamos una instancia del modelo Pydantic con los datos de la BD
         user = UserInDB(id=user_data[0], email=user_data[1], role=user_data[2])
         return user
     finally:
@@ -64,13 +72,12 @@ def get_current_user_from_token(token: str) -> UserInDB:
         if conn: conn.close()
 
 
-# === FUNCIÓN CORREGIDA Y MEJORADA para Administradores ===
+# === FUNCIÓN para Administradores (Ahora funciona correctamente) ===
 def get_current_admin(token: str = Depends(OAuth2PasswordBearer(tokenUrl="/auth/admin-login"))) -> UserInDB:
     """
     Verifica que el token pertenezca a un usuario que es administrador.
     """
     user = get_current_user_from_token(token)
-    # Asumiendo que el rol en la base de datos se llama 'admin'
     if user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -79,13 +86,10 @@ def get_current_admin(token: str = Depends(OAuth2PasswordBearer(tokenUrl="/auth/
     return user
 
 
-# === FUNCIÓN NUEVA que resuelve tu error de despliegue ===
+# === FUNCIÓN para Usuarios Activos (Ahora funciona correctamente) ===
 def get_current_active_user(token: str = Depends(oauth2_scheme_user)) -> UserInDB:
     """
     Dependencia de FastAPI para obtener el usuario activo actual desde un token.
-    Esta es la función que el router de 'training' necesita.
     """
     user = get_current_user_from_token(token)
-    # Aquí podrías añadir más validaciones, como si el usuario está activo o confirmado.
-    # Por ahora, simplemente lo devolvemos.
     return user
