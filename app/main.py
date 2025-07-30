@@ -56,33 +56,36 @@ app.add_middleware(
 async def log_request(request: Request, call_next):
     logger.info(f"📥 {request.method} {request.url.path}")
     response = await call_next(request)
-    logger.info(f"📤 {response.status_code}")
+    logger.info(f"� {response.status_code}")
     return response
 
 # --- Inclusión de Routers ---
 
-# CORRECCIÓN: Se añade el prefijo /api a los routers que lo necesitan.
-# Esto asegura que la ruta final sea /api/cv/regenerate-all-profiles/
-app.include_router(cv_confirm.router, prefix="/api") 
-app.include_router(cv_upload.router, prefix="/api")
-app.include_router(job.router, prefix="/api")
-app.include_router(apply.router, prefix="/api")
-app.include_router(proposal.router, prefix="/api")
-app.include_router(match.router, prefix="/api")
-app.include_router(admin_templates.router, prefix="/api")
-app.include_router(admin_config.router, prefix="/api")
-app.include_router(email_db_admin.router, prefix="/api")
-app.include_router(job_admin.router, prefix="/api")
+# Grupo 1: Routers que forman parte de la API y necesitan el prefijo /api
+api_routers = [
+    cv_confirm.router,
+    cv_upload.router,
+    job.router,
+    proposal.router,
+    apply.router,
+    match.router,
+    admin_templates.router,
+    admin_users.router,
+    admin_config.router,
+    email_db_admin.router,
+    job_admin.router,
+    users.router,
+    files.router,
+    integration.router,
+    training.router,
+    cv_admin_upload.router
+]
+for r in api_routers:
+    app.include_router(r, prefix="/api")
 
-# Routers que no necesitan el prefijo /api
+# Grupo 2: Routers con rutas especiales que no usan /api
 app.include_router(auth.router)
-app.include_router(files.router)
-app.include_router(integration.router)
-app.include_router(users.router)
 app.include_router(webhooks.router)
-app.include_router(admin_users.router)
-app.include_router(cv_admin_upload.router)
-app.include_router(training.router)
 app.include_router(admin_auth_router, prefix="/auth", tags=["admin"])
 
 
@@ -97,4 +100,3 @@ def list_routes():
     logger.info("✅ Rutas cargadas exitosamente:")
     for route in url_list:
         logger.info(f"  - Path: {route['path']}")
-
