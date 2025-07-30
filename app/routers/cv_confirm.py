@@ -49,7 +49,9 @@ def generate_secure_password(length=12):
     hashed = bcrypt.hashpw(plain_password.encode('utf-8'), bcrypt.gensalt())
     return plain_password, hashed.decode('utf-8')
 
-router = APIRouter(prefix="/api/cv", tags=["cv"])
+# --- CORRECCIÓN ---
+# Se quita "/api" del prefijo. main.py se encargará de añadirlo.
+router = APIRouter(prefix="/cv", tags=["cv"])
 
 def extract_text_from_pdf(pdf_bytes):
     """Extrae el texto completo de un PDF dado en bytes."""
@@ -60,50 +62,41 @@ def extract_text_from_pdf(pdf_bytes):
     except Exception as e:
         raise Exception(f"Error extrayendo texto del PDF: {e}")
 
-# --- FUNCIÓN MEJORADA PARA EXTRAER TELÉFONO ---
 def extract_phone(text):
     """
-    Extrae un número de teléfono de forma más inteligente, evitando confundirlo con CUITs o fechas.
+    Extrae un número de teléfono de forma más inteligente, evitando confundirlo con CUITs o rangos de años.
     """
-    # Busca secuencias de caracteres que podrían ser un teléfono.
     potential_phones = re.findall(r'(\+?\d[\s\-\(\)]{0,3}){7,}\d+', text)
-    
     for candidate in potential_phones:
-        # Limpia el candidato para contar solo los dígitos.
         digits_only = re.sub(r'\D', '', candidate)
-        
-        # --- FILTRO 1: Descartar CUITs ---
-        # Un CUIT en Argentina tiene 11 dígitos y empieza con prefijos específicos.
         is_cuit = (
             len(digits_only) == 11 and 
             digits_only.startswith(('20', '23', '24', '27', '30', '33', '34'))
         )
         if is_cuit:
-            continue # Si parece un CUIT, lo ignoramos y seguimos con el siguiente candidato.
-
-        # --- FILTRO 2: Validar longitud de teléfono ---
-        # Un número de teléfono argentino válido (con código de área) tiene al menos 10 dígitos.
-        if len(digits_only) >= 10:
-            return candidate.strip() # Devolvemos el primer candidato que pase los filtros.
-            
-    # Si el bucle termina sin encontrar un teléfono válido, devolvemos None.
+            continue
+        years = re.findall(r'\b\d{4}\b', candidate)
+        if len(years) > 1 and len(digits_only) < 10:
+             continue
+        if 10 <= len(digits_only) <= 13:
+            return candidate.strip()
     return None
 
 def extract_name(text):
     """
-    Usa OpenAI para extraer el nombre completo del candidato a partir del CV.
+    Usa OpenAI para extraer el nombre completo del candidato a partir del CV con un prompt mejorado.
     """
     name_prompt = [
-        {"role": "system", "content": "Eres un experto en análisis de currículums."},
-        {"role": "user", "content": f"A partir del siguiente CV, extrae solo el nombre completo del candidato sin incluir títulos o cargos. Si no encuentras un nombre, responde 'No encontrado'.\n\nCV:\n{text[:1000]}"}
+        {"role": "system", "content": "Eres un experto en análisis de currículums. Tu tarea es extraer el nombre y apellido del candidato del siguiente texto. El nombre suele ser lo primero y más destacado en el CV. Ignora cualquier cargo o título profesional que pueda aparecer junto al nombre. Devuelve únicamente el nombre completo. Si no puedes identificar un nombre claro, responde 'No encontrado'."},
+        {"role": "user", "content": f"A partir del siguiente CV, extrae solo el nombre completo del candidato.\n\nCV:\n{text[:1000]}"}
     ]
     name_response = client.chat.completions.create(
         model="gpt-4-turbo",
         messages=name_prompt,
         max_tokens=20
     )
-    name_from_cv = name_response.choices[0].message.content.strip()
-    if name_from_cv.lower() == "no encontrado" or not name_from_cv:
+    name_from_cv = name_response.choices[0].message.content.strip().replace('"', '').replace("'", "")
+    if "no encontrado" in name_from_cv.lower() or not name_from_cv or len(name_from_cv.split()) < 2:
         return None
     return name_from_cv
 
@@ -117,7 +110,7 @@ def run_regeneration_for_all_users():
     """
     Tarea en segundo plano para regenerar los perfiles de todos los usuarios.
     """
-    print("🚀 INICIANDO TAREA DE REGENERACIÓN DE PERFILES PARA TODOS LOS USUARIOS 🚀")
+    print("🚀 INICIANDO TAREA DE REGENERACIÓN DE PERFILES PARA TODOS LOS USUARIOS �")
     conn = None
     cur = None
     try:

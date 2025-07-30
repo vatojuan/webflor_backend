@@ -61,7 +61,7 @@ async def log_request(request: Request, call_next):
 
 # --- Inclusión de Routers ---
 
-# Grupo 1: Routers que necesitan el prefijo /api
+# Grupo 1: Routers que forman parte de la API y necesitan el prefijo /api
 api_routers = [
     cv_confirm.router,
     cv_upload.router,
@@ -85,7 +85,7 @@ for r in api_routers:
 # Grupo 2: Routers con rutas especiales que NO usan /api
 app.include_router(auth.router)
 app.include_router(webhooks.router)
-app.include_router(admin_users.router) # <- CORRECCIÓN: Movido a este grupo
+app.include_router(admin_users.router)
 app.include_router(admin_auth_router, prefix="/auth", tags=["admin"])
 
 
