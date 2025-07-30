@@ -56,12 +56,12 @@ app.add_middleware(
 async def log_request(request: Request, call_next):
     logger.info(f"📥 {request.method} {request.url.path}")
     response = await call_next(request)
-    logger.info(f"� {response.status_code}")
+    logger.info(f"📤 {response.status_code}")
     return response
 
 # --- Inclusión de Routers ---
 
-# Grupo 1: Routers que forman parte de la API y necesitan el prefijo /api
+# Grupo 1: Routers que necesitan el prefijo /api
 api_routers = [
     cv_confirm.router,
     cv_upload.router,
@@ -70,7 +70,6 @@ api_routers = [
     apply.router,
     match.router,
     admin_templates.router,
-    admin_users.router,
     admin_config.router,
     email_db_admin.router,
     job_admin.router,
@@ -83,9 +82,10 @@ api_routers = [
 for r in api_routers:
     app.include_router(r, prefix="/api")
 
-# Grupo 2: Routers con rutas especiales que no usan /api
+# Grupo 2: Routers con rutas especiales que NO usan /api
 app.include_router(auth.router)
 app.include_router(webhooks.router)
+app.include_router(admin_users.router) # <- CORRECCIÓN: Movido a este grupo
 app.include_router(admin_auth_router, prefix="/auth", tags=["admin"])
 
 
