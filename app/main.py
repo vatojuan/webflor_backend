@@ -59,26 +59,35 @@ async def log_request(request: Request, call_next):
     logger.info(f"📤 {response.status_code}")
     return response
 
-# --- Inclusión de Routers (Lógica Original Restaurada) ---
-# Cada router es responsable de su propio prefijo.
+# --- Inclusión de Routers ---
+
+# Grupo 1: Routers que forman parte de la API y necesitan el prefijo /api
+# Todos los archivos de router listados aquí deben tener sus prefijos SIN /api.
+# Por ejemplo, en cv_confirm.py, el prefijo debe ser "/cv", no "/api/cv".
+api_routers = [
+    cv_confirm.router,
+    cv_upload.router,
+    job.router,
+    proposal.router,
+    apply.router,
+    match.router,
+    admin_templates.router,
+    admin_config.router,
+    email_db_admin.router,
+    job_admin.router,
+    users.router,
+    files.router,
+    integration.router,
+    training.router,
+    cv_admin_upload.router
+]
+for r in api_routers:
+    app.include_router(r, prefix="/api")
+
+# Grupo 2: Routers con rutas especiales que NO usan /api
 app.include_router(auth.router)
-app.include_router(cv_confirm.router)
-app.include_router(cv_upload.router)
-app.include_router(files.router)
-app.include_router(integration.router)
-app.include_router(users.router)
 app.include_router(webhooks.router)
-app.include_router(job.router)
-app.include_router(apply.router)
-app.include_router(proposal.router)
-app.include_router(match.router)
-app.include_router(admin_templates.router)
-app.include_router(admin_users.router)
-app.include_router(admin_config.router)
-app.include_router(cv_admin_upload.router)
-app.include_router(email_db_admin.router)
-app.include_router(job_admin.router)
-app.include_router(training.router)
+app.include_router(admin_users.router) # Esta ruta no lleva /api según tu frontend
 app.include_router(admin_auth_router, prefix="/auth", tags=["admin"])
 
 
