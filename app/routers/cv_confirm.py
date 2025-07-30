@@ -49,9 +49,7 @@ def generate_secure_password(length=12):
     hashed = bcrypt.hashpw(plain_password.encode('utf-8'), bcrypt.gensalt())
     return plain_password, hashed.decode('utf-8')
 
-# --- CORRECCIÓN ---
-# Se quita "/api" del prefijo. main.py se encargará de añadirlo.
-router = APIRouter(prefix="/cv", tags=["cv"])
+router = APIRouter(prefix="/api/cv", tags=["cv"])
 
 def extract_text_from_pdf(pdf_bytes):
     """Extrae el texto completo de un PDF dado en bytes."""
@@ -62,15 +60,33 @@ def extract_text_from_pdf(pdf_bytes):
     except Exception as e:
         raise Exception(f"Error extrayendo texto del PDF: {e}")
 
+# --- FUNCIÓN MEJORADA PARA EXTRAER TELÉFONO ---
 def extract_phone(text):
     """
-    Extrae un número de teléfono de forma más inteligente, evitando confundirlo con fechas.
+    Extrae un número de teléfono de forma más inteligente, evitando confundirlo con CUITs o fechas.
     """
-    potential_phones = re.findall(r'[\d\s\-\(\)\+]{9,20}', text)
+    # Busca secuencias de caracteres que podrían ser un teléfono.
+    potential_phones = re.findall(r'(\+?\d[\s\-\(\)]{0,3}){7,}\d+', text)
+    
     for candidate in potential_phones:
+        # Limpia el candidato para contar solo los dígitos.
         digits_only = re.sub(r'\D', '', candidate)
-        if len(digits_only) > 8:
-            return candidate.strip()
+        
+        # --- FILTRO 1: Descartar CUITs ---
+        # Un CUIT en Argentina tiene 11 dígitos y empieza con prefijos específicos.
+        is_cuit = (
+            len(digits_only) == 11 and 
+            digits_only.startswith(('20', '23', '24', '27', '30', '33', '34'))
+        )
+        if is_cuit:
+            continue # Si parece un CUIT, lo ignoramos y seguimos con el siguiente candidato.
+
+        # --- FILTRO 2: Validar longitud de teléfono ---
+        # Un número de teléfono argentino válido (con código de área) tiene al menos 10 dígitos.
+        if len(digits_only) >= 10:
+            return candidate.strip() # Devolvemos el primer candidato que pase los filtros.
+            
+    # Si el bucle termina sin encontrar un teléfono válido, devolvemos None.
     return None
 
 def extract_name(text):
