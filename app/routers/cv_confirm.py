@@ -60,36 +60,85 @@ def extract_text_from_pdf(pdf_bytes):
     except Exception as e:
         raise Exception(f"Error extrayendo texto del PDF: {e}")
 
-# --- FUNCIÓN DE TELÉFONO PROFESIONAL ---
+# --- FUNCIÓN DE TELÉFONO CORREGIDA ---
 def extract_phone(text):
     """
-    Extrae un número de teléfono de forma mucho más precisa, buscando patrones específicos
-    y descartando activamente CUITs, fechas y otros números irrelevantes.
+    Extrae un número de teléfono de un texto, priorizando formatos comunes en Argentina
+    y aplicando filtros robustos para descartar fechas, CUITs y otros números irrelevantes.
     """
-    # Expresión regular más amplia para capturar cualquier secuencia que pueda ser un teléfono.
-    potential_phones = re.findall(r'[\d\s\-\(\)\+]{8,25}', text)
-    valid_phones = []
+    # Explicación del regex principal:
+    # (?<=\s|^|\:)   -> Lookbehind: Asegura que el número esté precedido por un espacio, el inicio de línea o dos puntos. Evita capturar parte de otro número.
+    # ( ... )         -> Grupo de captura principal.
+    # \+?54(?:[ \-]?)?9? -> Prefijo internacional opcional (+54, +54 9, 549, etc.).
+    # \s?             -> Espacio opcional.
+    # (?:(?:\d{2,4})|\(\d{2,4}\)) -> Código de área (2-4 dígitos) con o sin paréntesis.
+    # [\s\-.]?        -> Separador opcional (espacio, guion, punto).
+    # (?:\d{3,4}[\s\-.]?\d{4,5}) -> El número principal, permitiendo un separador en el medio.
+    # (?!\d)          -> Lookahead: Asegura que el número no esté seguido por otro dígito.
+    phone_pattern = re.compile(r"""
+        (?:(?<=\s)|(?<=^)|(?<=\:))
+        (
+            (?:\+?54(?:[ \-]?)?9?)?
+            \s?
+            (?:(?:\d{2,4})|\(\d{2,4}\))
+            [\s\-.]?
+            (?:\d{3,4}[\s\-.]?\d{4,5})
+        )
+        (?!\d)
+    """, re.VERBOSE)
 
-    for candidate in potential_phones:
-        digits_only = re.sub(r'\D', '', candidate)
-        
-        # --- FILTROS DE DESCARTE ---
-        if len(digits_only) < 8:
+    # Búsqueda inicial con el patrón principal
+    potential_phones = phone_pattern.findall(text)
+    
+    # Búsqueda adicional cerca de palabras clave para aumentar la precisión
+    keyword_pattern = re.compile(r'(?:tel(?:éfono)?|cel(?:ular)?|whatsapp|contacto|m[óo]vil)[\s:.]*([+\d\s\-\(\)]{8,20})', re.IGNORECASE)
+    potential_phones.extend(keyword_pattern.findall(text))
+
+    valid_phones = []
+    for phone in potential_phones:
+        cleaned_phone = phone.strip()
+        digits_only = re.sub(r'\D', '', cleaned_phone)
+
+        # --- Filtros de descarte más estrictos ---
+
+        # 1. Descartar si tiene muy pocos o demasiados dígitos para ser un teléfono.
+        if not (8 <= len(digits_only) <= 15):
             continue
+
+        # 2. Descartar si parece un CUIT/CUIL (formato XX-XXXXXXXX-X).
         if len(digits_only) == 11 and digits_only.startswith(('20', '23', '24', '27', '30', '33', '34')):
             continue
-        if re.search(r'\b(19|20)\d{2}\b', candidate) and len(digits_only) < 10:
-            continue
-        if re.search(r'\d{2}[-/]\d{2}[-/]\d{4}', candidate): # Descarta fechas dd/mm/yyyy
-            continue
-
-        valid_phones.append(candidate.strip())
-
-    if valid_phones:
-        # Devuelve el candidato más largo, que es más probable que sea un número completo.
-        return max(valid_phones, key=len)
         
-    return None
+        # 3. Descartar si es claramente un rango de años o una fecha.
+        #    Busca patrones como "2010 - 2015", "2010 a 2015", etc.
+        if re.search(r'\b(19|20)\d{2}\b\s*[-–aA]\s*\b(19|20)\d{2}\b', cleaned_phone, re.IGNORECASE):
+            continue
+        if re.search(r'\b(actualidad|presente|hoy)\b', cleaned_phone, re.IGNORECASE):
+            continue
+
+        # 4. Descartar si contiene letras (a veces se cuelan en la captura inicial).
+        if re.search(r'[a-zA-Z]', cleaned_phone):
+            continue
+
+        valid_phones.append(cleaned_phone)
+
+    if not valid_phones:
+        return None
+
+    # --- Lógica de selección mejorada ---
+    # Se priorizan los números que tienen una longitud más probable para un teléfono (10-13 dígitos).
+    # Esto evita seleccionar cadenas numéricas muy cortas o muy largas.
+    def score(p):
+        digits = len(re.sub(r'\D', '', p))
+        if 10 <= digits <= 13:
+            return 100 + digits  # Máxima prioridad para números de longitud ideal
+        return digits
+
+    # Devolver el mejor candidato basado en la puntuación.
+    best_phone = max(valid_phones, key=score)
+    
+    return best_phone.strip()
+
 
 # --- FUNCIÓN DE NOMBRE PROFESIONAL ---
 def extract_name(text):
@@ -198,7 +247,7 @@ def run_regeneration_for_all_users():
                 print(f"✅ Perfil del usuario {user_id} actualizado en la base de datos.")
             except Exception as e:
                 print(f"❌ ERROR procesando al usuario {user_id} ({user_email}): {e}")
-                conn.rollback() 
+                if conn: conn.rollback() 
     except Exception as e:
         print(f"❌❌ ERROR CRÍTICO durante la tarea de regeneración: {e}")
     finally:
@@ -337,6 +386,7 @@ async def confirm_email(code: str = Query(...)):
 
     except Exception as e:
         print(f"❌ Error confirmando cuenta: {e}")
+        if conn and not conn.closed: conn.rollback()
         raise HTTPException(status_code=500, detail=f"Error confirmando cuenta: {e}")
     finally:
         if cur:
