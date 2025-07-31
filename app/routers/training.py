@@ -84,7 +84,6 @@ def upload_lesson(
     conn.close()
     return {"message": "Lección añadida exitosamente", "videoUrl": video_url}
 
-# --- NUEVO ENDPOINT DE ADMIN PARA VER CURSOS ---
 @router.get("/admin/courses")
 def admin_list_courses(current_admin: UserInDB = Depends(get_current_admin)):
     """
@@ -108,7 +107,6 @@ def admin_list_courses(current_admin: UserInDB = Depends(get_current_admin)):
     conn.close()
     return courses
 
-# --- NUEVO ENDPOINT DE ADMIN PARA VER INSCRIPCIONES ---
 @router.get("/admin/courses/{course_id}/enrollments")
 def admin_get_enrollments(course_id: uuid.UUID, current_admin: UserInDB = Depends(get_current_admin)):
     """
@@ -131,6 +129,23 @@ def admin_get_enrollments(course_id: uuid.UUID, current_admin: UserInDB = Depend
     cur.close()
     conn.close()
     return enrollments
+
+@router.get("/admin/courses/{course_id}/lessons")
+def admin_get_lessons(course_id: uuid.UUID, current_admin: UserInDB = Depends(get_current_admin)):
+    """
+    Devuelve la lista de lecciones de un curso específico.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    query = 'SELECT id, title, "orderIndex", "videoUrl" FROM "Lesson" WHERE "courseId" = %s ORDER BY "orderIndex" ASC'
+    cur.execute(query, (str(course_id),))
+    lessons = [
+        {"id": row[0], "title": row[1], "orderIndex": row[2], "videoUrl": row[3]}
+        for row in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return lessons
 
 # ===============================================================
 # ===================== ENDPOINTS PARA USUARIOS =================
@@ -162,6 +177,50 @@ def list_all_courses(current_user: UserInDB = Depends(get_current_active_user)):
     cur.close()
     conn.close()
     return courses
+
+# --- NUEVO ENDPOINT PARA LA VISTA DE DETALLE DEL CURSO DEL USUARIO ---
+@router.get("/courses/{course_id}/details")
+def get_course_details_for_user(course_id: uuid.UUID, current_user: UserInDB = Depends(get_current_active_user)):
+    """
+    Obtiene los detalles de un curso, su lista de lecciones y marca cuáles
+    ha completado el usuario actual.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # Primero, obtenemos los detalles del curso
+    cur.execute('SELECT id, title, description FROM "Course" WHERE id = %s', (str(course_id),))
+    course_data = cur.fetchone()
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+    
+    course_details = {"id": course_data[0], "title": course_data[1], "description": course_data[2], "lessons": []}
+
+    # Luego, obtenemos las lecciones y si están completadas por el usuario
+    query = """
+    SELECT 
+        l.id, 
+        l.title, 
+        l."orderIndex", 
+        l."videoUrl",
+        (lp.id IS NOT NULL) as "isCompleted"
+    FROM "Lesson" l
+    LEFT JOIN "Enrollment" e ON l."courseId" = e."courseId" AND e."userId" = %s
+    LEFT JOIN "LessonProgress" lp ON l.id = lp."lessonId" AND e.id = lp."enrollmentId"
+    WHERE l."courseId" = %s
+    ORDER BY l."orderIndex" ASC;
+    """
+    cur.execute(query, (current_user.id, str(course_id)))
+    lessons = [
+        {"id": row[0], "title": row[1], "orderIndex": row[2], "videoUrl": row[3], "isCompleted": row[4]}
+        for row in cur.fetchall()
+    ]
+    course_details["lessons"] = lessons
+
+    cur.close()
+    conn.close()
+    return course_details
+
 
 @router.post("/enroll/{course_id}")
 def enroll_in_course(course_id: uuid.UUID, current_user: UserInDB = Depends(get_current_active_user)):
