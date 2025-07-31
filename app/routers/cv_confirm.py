@@ -60,11 +60,11 @@ def extract_text_from_pdf(pdf_bytes):
     except Exception as e:
         raise Exception(f"Error extrayendo texto del PDF: {e}")
 
-# --- FUNCIÓN DE TELÉFONO MÁS ROBUSTA ---
+# --- FUNCIÓN DE TELÉFONO PROFESIONAL ---
 def extract_phone(text):
     """
-    Extrae un número de teléfono de forma más inteligente, recopilando todos los candidatos
-    y eligiendo el mejor, mientras descarta CUITs y fechas.
+    Extrae un número de teléfono de forma mucho más precisa, buscando patrones específicos
+    y descartando activamente CUITs, fechas y otros números irrelevantes.
     """
     # Expresión regular más amplia para capturar cualquier secuencia que pueda ser un teléfono.
     potential_phones = re.findall(r'[\d\s\-\(\)\+]{8,25}', text)
@@ -73,35 +73,32 @@ def extract_phone(text):
     for candidate in potential_phones:
         digits_only = re.sub(r'\D', '', candidate)
         
-        # --- FILTRO 1: Descartar si tiene pocos dígitos ---
+        # --- FILTROS DE DESCARTE ---
         if len(digits_only) < 8:
             continue
-
-        # --- FILTRO 2: Descartar CUITs ---
         if len(digits_only) == 11 and digits_only.startswith(('20', '23', '24', '27', '30', '33', '34')):
             continue
-
-        # --- FILTRO 3: Descartar si es claramente un rango de años ---
-        years = re.findall(r'\b(19|20)\d{2}\b', candidate)
-        if len(years) > 1 and len(digits_only) < 10:
+        if re.search(r'\b(19|20)\d{2}\b', candidate) and len(digits_only) < 10:
+            continue
+        if re.search(r'\d{2}[-/]\d{2}[-/]\d{4}', candidate): # Descarta fechas dd/mm/yyyy
             continue
 
         valid_phones.append(candidate.strip())
 
-    # Si encontramos teléfonos válidos, devolvemos el más largo (más probable que tenga código de área).
     if valid_phones:
+        # Devuelve el candidato más largo, que es más probable que sea un número completo.
         return max(valid_phones, key=len)
         
     return None
 
-# --- FUNCIÓN DE NOMBRE MÁS ROBUSTA ---
+# --- FUNCIÓN DE NOMBRE PROFESIONAL ---
 def extract_name(text):
     """
-    Usa OpenAI para extraer el nombre completo del candidato con un prompt y filtros mejorados.
+    Usa OpenAI para extraer el nombre completo con un prompt más robusto y filtros de validación.
     """
     name_prompt = [
-        {"role": "system", "content": "Eres un experto en análisis de currículums. Tu tarea es extraer el nombre y apellido del candidato del siguiente texto. El nombre suele ser lo primero y más destacado en el CV. Ignora cualquier cargo o título profesional que pueda aparecer junto al nombre. Devuelve únicamente el nombre completo. Si no puedes identificar un nombre claro, responde 'No encontrado'."},
-        {"role": "user", "content": f"A partir del siguiente CV, extrae solo el nombre completo del candidato.\n\nCV:\n{text[:1500]}"} # Aumentamos el contexto
+        {"role": "system", "content": "Eres un analista de RR.HH. experto. Tu tarea es extraer el nombre y apellido del candidato del siguiente texto. El nombre suele ser lo primero y más destacado en el CV, a menudo en mayúsculas o en una fuente más grande. Ignora cualquier cargo, título profesional o email que pueda aparecer junto al nombre. Devuelve únicamente el nombre completo. Si no puedes identificar un nombre claro, responde 'No encontrado'."},
+        {"role": "user", "content": f"A partir del siguiente CV, extrae solo el nombre completo del candidato.\n\nCV:\n{text[:2000]}"}
     ]
     name_response = client.chat.completions.create(
         model="gpt-4-turbo",
@@ -110,11 +107,13 @@ def extract_name(text):
     )
     name_from_cv = name_response.choices[0].message.content.strip().replace('"', '').replace("'", "")
     
-    # Filtro más robusto para validar la respuesta de la IA
+    # Filtro de validación más estricto
     if ("no encontrado" in name_from_cv.lower() or 
         not name_from_cv or 
-        len(name_from_cv.split()) < 2 or # Debe tener al menos nombre y apellido
-        "@" in name_from_cv): # No puede ser un email
+        len(name_from_cv.split()) < 2 or 
+        "@" in name_from_cv or
+        "CV" in name_from_cv.upper() or
+        "CURRICULUM" in name_from_cv.upper()):
         return None
         
     return name_from_cv
@@ -135,14 +134,15 @@ def run_regeneration_for_all_users():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute('SELECT id, email, "cvUrl" FROM "User" WHERE "cvUrl" IS NOT NULL')
+        cur.execute('SELECT id, email, "cvUrl", name FROM "User"') # Traemos el nombre actual
         users = cur.fetchall()
         print(f"👥 Se encontraron {len(users)} usuarios para procesar.")
         bucket = storage_client.bucket(BUCKET_NAME)
 
-        for user_id, user_email, cv_url in users:
+        for user_id, user_email, cv_url, current_name in users:
             try:
                 print(f"\n--- 🔄 Procesando usuario ID: {user_id}, Email: {user_email} ---")
+                
                 if not cv_url or not cv_url.startswith(f"https://storage.googleapis.com/{BUCKET_NAME}/"):
                     print(f"⚠️ URL de CV inválida o ausente para el usuario {user_id}. Saltando.")
                     continue
@@ -161,8 +161,19 @@ def run_regeneration_for_all_users():
                     print(f"⚠️ No se pudo extraer texto del CV para el usuario {user_id}. Saltando.")
                     continue
                 
-                phone_number = extract_phone(text_content)
-                print(f"✅ Nuevo teléfono extraído: {phone_number}")
+                # --- Lógica de actualización mejorada ---
+                new_phone = extract_phone(text_content)
+                print(f"✅ Nuevo teléfono extraído: {new_phone}")
+
+                new_name = extract_name(text_content)
+                if not new_name:
+                    print("⚠️ OpenAI no encontró un nombre válido. Se mantiene el nombre actual o se genera desde el email.")
+                    # Si el nombre actual es "No encontrado" o un email, lo generamos de nuevo.
+                    if current_name is None or "no encontrado" in current_name.lower() or "@" in current_name:
+                        new_name = user_email.split("@")[0].replace(".", " ").replace("_", " ").title()
+                    else:
+                        new_name = current_name # Mantenemos el nombre que ya tenía.
+                print(f"✅ Nuevo nombre: {new_name}")
 
                 description_prompt = [
                     {"role": "system", "content": "Eres un analista de RR.HH. experto. Tu objetivo es crear un resumen profesional y atractivo basado exclusivamente en el CV. La longitud del resumen debe ser proporcional a la información útil del CV, sin rellenar y sin superar los 950 caracteres. Redacta en un tono profesional y directo."},
@@ -180,8 +191,8 @@ def run_regeneration_for_all_users():
                 print("✅ Nuevo embedding de descripción generado.")
 
                 cur.execute(
-                    'UPDATE "User" SET description = %s, phone = %s, embedding = %s WHERE id = %s',
-                    (description, phone_number, embedding_desc, user_id)
+                    'UPDATE "User" SET name = %s, description = %s, phone = %s, embedding = %s WHERE id = %s',
+                    (new_name, description, new_phone, embedding_desc, user_id)
                 )
                 conn.commit()
                 print(f"✅ Perfil del usuario {user_id} actualizado en la base de datos.")
@@ -257,7 +268,7 @@ async def confirm_email(code: str = Query(...)):
         name_from_cv = extract_name(text_content)
         if not name_from_cv:
             print("⚠️ OpenAI no encontró el nombre en el CV, usando parte del email como referencia.")
-            name_from_cv = user_email.split("@")[0]
+            name_from_cv = user_email.split("@")[0].replace(".", " ").replace("_", " ").title()
         print(f"✅ Nombre extraído con OpenAI: {name_from_cv}")
 
         print("🧠 Iniciando generación de descripción profesional y adaptativa...")
