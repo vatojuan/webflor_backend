@@ -1,26 +1,31 @@
 import os
 import json
 import uuid
+import datetime
 import psycopg2
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, status
 from typing import List
 from google.cloud import storage
 
 # --- Importaciones de la aplicación ---
+# Se importan las dependencias de autenticación y el modelo de usuario.
 from app.utils.auth_utils import get_current_admin, get_current_active_user, UserInDB
+# Se reutiliza la función de conexión a la base de datos para mantener consistencia.
 from app.routers.auth import get_db_connection
 
 # --- Configuración de Servicios Externos ---
 try:
-    # Carga de credenciales de Google Cloud Storage
+    # Carga de credenciales de Google Cloud Storage desde variables de entorno.
     service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
     storage_client = storage.Client.from_service_account_info(service_account_info)
     BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
 except (json.JSONDecodeError, TypeError):
+    # Si las credenciales no están configuradas, los servicios que las usan fallarán de forma controlada.
     storage_client = None
     BUCKET_NAME = None
 
-# --- Inicialización del Router ---
+# --- Inicialización del Router de FastAPI ---
+# Se define un prefijo y una etiqueta para agrupar todas las rutas de este módulo en la documentación.
 router = APIRouter(prefix="/training", tags=["Formación"])
 
 
@@ -28,12 +33,13 @@ router = APIRouter(prefix="/training", tags=["Formación"])
 def delete_blob_from_gcs(blob_url: str):
     """
     Elimina un archivo de Google Cloud Storage a partir de su URL pública.
-    Si falla, imprime un error pero no detiene la ejecución.
+    Está diseñado para no detener la ejecución si falla, solo imprime un error.
     """
     if not storage_client or not blob_url or not blob_url.startswith(f"https://storage.googleapis.com/{BUCKET_NAME}/"):
         return
     try:
         bucket = storage_client.bucket(BUCKET_NAME)
+        # Extrae el nombre del archivo (blob) desde la URL completa.
         blob_name = blob_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
         blob = bucket.blob(blob_name)
         if blob.exists():
@@ -53,7 +59,7 @@ def create_course(
     image: UploadFile = File(None),
     current_admin: UserInDB = Depends(get_current_admin)
 ):
-    """Crea un nuevo curso. Requiere permisos de administrador."""
+    """Crea un nuevo curso con título, descripción e imagen de portada opcional. Requiere permisos de administrador."""
     image_url = None
     if image and storage_client:
         image_blob_name = f"course-images/{uuid.uuid4()}-{image.filename}"
@@ -121,10 +127,7 @@ def admin_list_courses(current_admin: UserInDB = Depends(get_current_admin)):
         ORDER BY c."createdAt" DESC;
         """
         cur.execute(query)
-        return [
-            {"id": r[0], "title": r[1], "description": r[2], "imageUrl": r[3], "studentCount": r[4]}
-            for r in cur.fetchall()
-        ]
+        return [{"id": r[0], "title": r[1], "description": r[2], "imageUrl": r[3], "studentCount": r[4]} for r in cur.fetchall()]
     finally:
         cur.close()
         conn.close()
@@ -135,11 +138,7 @@ def admin_get_enrollments(course_id: uuid.UUID, current_admin: UserInDB = Depend
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        query = """
-        SELECT u.name, u.email, e.progress FROM "Enrollment" e
-        JOIN "User" u ON e."userId" = u.id
-        WHERE e."courseId" = %s ORDER BY u.name;
-        """
+        query = 'SELECT u.name, u.email, e.progress FROM "Enrollment" e JOIN "User" u ON e."userId" = u.id WHERE e."courseId" = %s ORDER BY u.name;'
         cur.execute(query, (str(course_id),))
         return [{"name": r[0], "email": r[1], "progress": r[2]} for r in cur.fetchall()]
     finally:
@@ -176,10 +175,9 @@ def admin_delete_course(course_id: uuid.UUID, current_admin: UserInDB = Depends(
             raise HTTPException(status_code=404, detail="Curso no encontrado")
         conn.commit()
 
-        if image_url_to_delete:
-            delete_blob_from_gcs(image_url_to_delete)
-        for video_url in video_urls_to_delete:
-            delete_blob_from_gcs(video_url)
+        if image_url_to_delete: delete_blob_from_gcs(image_url_to_delete)
+        for video_url in video_urls_to_delete: delete_blob_from_gcs(video_url)
+        
         return
     except Exception as e:
         if conn: conn.rollback()
@@ -187,6 +185,58 @@ def admin_delete_course(course_id: uuid.UUID, current_admin: UserInDB = Depends(
     finally:
         if cur: cur.close()
         if conn: conn.close()
+
+@router.put("/admin/lessons/{lesson_id}", summary="Editar una lección")
+def admin_edit_lesson(lesson_id: uuid.UUID, title: str = Form(...), order_index: int = Form(...), current_admin: UserInDB = Depends(get_current_admin)):
+    """Actualiza el título y el orden de una lección existente."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute('UPDATE "Lesson" SET title = %s, "orderIndex" = %s WHERE id = %s', (title, order_index, str(lesson_id)))
+        if cur.rowcount == 0: raise HTTPException(status_code=404, detail="Lección no encontrada")
+        conn.commit()
+        return {"message": "Lección actualizada con éxito"}
+    finally:
+        cur.close()
+        conn.close()
+
+@router.delete("/admin/lessons/{lesson_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar una lección")
+def admin_delete_lesson(lesson_id: uuid.UUID, current_admin: UserInDB = Depends(get_current_admin)):
+    """Elimina una lección específica y su video asociado de GCS."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT "videoUrl" FROM "Lesson" WHERE id = %s', (str(lesson_id),))
+        video_url_to_delete = (cur.fetchone() or [None])[0]
+        cur.execute('DELETE FROM "Lesson" WHERE id = %s', (str(lesson_id),))
+        if cur.rowcount == 0: raise HTTPException(status_code=404, detail="Lección no encontrada")
+        conn.commit()
+        if video_url_to_delete: delete_blob_from_gcs(video_url_to_delete)
+        return
+    finally:
+        cur.close()
+        conn.close()
+
+@router.get("/admin/lessons/{lesson_id}/signed-url", summary="Obtener URL de descarga de video")
+def admin_get_lesson_download_url(lesson_id: uuid.UUID, current_admin: UserInDB = Depends(get_current_admin)):
+    """Genera una URL firmada (temporal y segura) para descargar un video."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT "videoUrl" FROM "Lesson" WHERE id = %s', (str(lesson_id),))
+        video_url = (cur.fetchone() or [None])[0]
+        if not video_url: raise HTTPException(status_code=404, detail="Video no encontrado")
+        if not storage_client: raise HTTPException(status_code=500, detail="Servicio de almacenamiento no configurado.")
+
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob_name = video_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
+        blob = bucket.blob(blob_name)
+        
+        signed_url = blob.generate_signed_url(version="v4", expiration=datetime.timedelta(minutes=15), method="GET")
+        return {"url": signed_url}
+    finally:
+        cur.close()
+        conn.close()
 
 
 # ===============================================================
@@ -199,12 +249,7 @@ def list_all_courses(current_user: UserInDB = Depends(get_current_active_user)):
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        query = """
-        SELECT c.id, c.title, c.description, c."imageUrl", e.id IS NOT NULL as "isEnrolled", COALESCE(e.progress, 0) as progress
-        FROM "Course" c
-        LEFT JOIN "Enrollment" e ON c.id = e."courseId" AND e."userId" = %s
-        ORDER BY c."createdAt" DESC;
-        """
+        query = 'SELECT c.id, c.title, c.description, c."imageUrl", e.id IS NOT NULL as "isEnrolled", COALESCE(e.progress, 0) as progress FROM "Course" c LEFT JOIN "Enrollment" e ON c.id = e."courseId" AND e."userId" = %s ORDER BY c."createdAt" DESC;'
         cur.execute(query, (current_user.id,))
         return [{"id": r[0], "title": r[1], "description": r[2], "imageUrl": r[3], "isEnrolled": r[4], "progress": r[5]} for r in cur.fetchall()]
     finally:
@@ -219,18 +264,11 @@ def get_course_details_for_user(course_id: uuid.UUID, current_user: UserInDB = D
     try:
         cur.execute('SELECT id, title, description FROM "Course" WHERE id = %s', (str(course_id),))
         course_data = cur.fetchone()
-        if not course_data:
-            raise HTTPException(status_code=404, detail="Curso no encontrado")
+        if not course_data: raise HTTPException(status_code=404, detail="Curso no encontrado")
         
         course_details = {"id": course_data[0], "title": course_data[1], "description": course_data[2]}
 
-        query = """
-        SELECT l.id, l.title, l."orderIndex", l."videoUrl", (lp.id IS NOT NULL) as "isCompleted"
-        FROM "Lesson" l
-        LEFT JOIN "Enrollment" e ON l."courseId" = e."courseId" AND e."userId" = %s
-        LEFT JOIN "LessonProgress" lp ON l.id = lp."lessonId" AND e.id = lp."enrollmentId"
-        WHERE l."courseId" = %s ORDER BY l."orderIndex" ASC;
-        """
+        query = 'SELECT l.id, l.title, l."orderIndex", l."videoUrl", (lp.id IS NOT NULL) as "isCompleted" FROM "Lesson" l LEFT JOIN "Enrollment" e ON l."courseId" = e."courseId" AND e."userId" = %s LEFT JOIN "LessonProgress" lp ON l.id = lp."lessonId" AND e.id = lp."enrollmentId" WHERE l."courseId" = %s ORDER BY l."orderIndex" ASC;'
         cur.execute(query, (current_user.id, str(course_id)))
         course_details["lessons"] = [{"id": r[0], "title": r[1], "orderIndex": r[2], "videoUrl": r[3], "isCompleted": r[4]} for r in cur.fetchall()]
         return course_details
@@ -260,14 +298,9 @@ def complete_lesson(lesson_id: uuid.UUID, current_user: UserInDB = Depends(get_c
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        cur.execute("""
-            SELECT e.id, e."courseId" FROM "Enrollment" e
-            JOIN "Lesson" l ON e."courseId" = l."courseId"
-            WHERE e."userId" = %s AND l.id = %s
-        """, (current_user.id, str(lesson_id)))
+        cur.execute('SELECT e.id, e."courseId" FROM "Enrollment" e JOIN "Lesson" l ON e."courseId" = l."courseId" WHERE e."userId" = %s AND l.id = %s', (current_user.id, str(lesson_id)))
         enrollment_data = cur.fetchone()
-        if not enrollment_data:
-            raise HTTPException(status_code=403, detail="No estás inscrito en el curso de esta lección.")
+        if not enrollment_data: raise HTTPException(status_code=403, detail="No estás inscrito en el curso de esta lección.")
         
         enrollment_id, course_id = enrollment_data
 
