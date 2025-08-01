@@ -30,6 +30,26 @@ router = APIRouter(prefix="/training", tags=["Formación"])
 
 
 # --- Funciones Auxiliares ---
+def generate_signed_url(blob_url: str) -> str:
+    """
+    Genera una URL firmada y temporal para un archivo privado en GCS.
+    Si falla o no está configurado, devuelve la URL original o None.
+    """
+    if not storage_client or not blob_url or not blob_url.startswith(f"https://storage.googleapis.com/{BUCKET_NAME}/"):
+        return blob_url # Devuelve la URL base si no se puede firmar
+
+    try:
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob_name = blob_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
+        blob = bucket.blob(blob_name)
+        
+        # La URL será válida por 1 hora, suficiente para ver un video.
+        url = blob.generate_signed_url(version="v4", expiration=datetime.timedelta(hours=1), method="GET")
+        return url
+    except Exception as e:
+        print(f"Error al generar URL firmada para {blob_url}: {e}")
+        return blob_url # Devuelve la URL base en caso de error
+
 def delete_blob_from_gcs(blob_url: str):
     """
     Elimina un archivo de Google Cloud Storage a partir de su URL pública.
@@ -245,20 +265,27 @@ def admin_get_lesson_download_url(lesson_id: uuid.UUID, current_admin: UserInDB 
 
 @router.get("/courses", summary="Listar cursos para un usuario")
 def list_all_courses(current_user: UserInDB = Depends(get_current_active_user)):
-    """Devuelve todos los cursos, indicando si el usuario actual está inscrito y su progreso."""
+    """Devuelve todos los cursos, con URLs de imagen firmadas."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         query = 'SELECT c.id, c.title, c.description, c."imageUrl", e.id IS NOT NULL as "isEnrolled", COALESCE(e.progress, 0) as progress FROM "Course" c LEFT JOIN "Enrollment" e ON c.id = e."courseId" AND e."userId" = %s ORDER BY c."createdAt" DESC;'
         cur.execute(query, (current_user.id,))
-        return [{"id": r[0], "title": r[1], "description": r[2], "imageUrl": r[3], "isEnrolled": r[4], "progress": r[5]} for r in cur.fetchall()]
+        courses = []
+        for r in cur.fetchall():
+            courses.append({
+                "id": r[0], "title": r[1], "description": r[2],
+                "imageUrl": generate_signed_url(r[3]) if r[3] else None,
+                "isEnrolled": r[4], "progress": r[5]
+            })
+        return courses
     finally:
         cur.close()
         conn.close()
 
 @router.get("/courses/{course_id}/details", summary="Ver el detalle de un curso")
 def get_course_details_for_user(course_id: uuid.UUID, current_user: UserInDB = Depends(get_current_active_user)):
-    """Obtiene los detalles de un curso, su lista de lecciones y marca cuáles ha completado el usuario."""
+    """Obtiene los detalles de un curso, con URLs de video firmadas."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -270,7 +297,15 @@ def get_course_details_for_user(course_id: uuid.UUID, current_user: UserInDB = D
 
         query = 'SELECT l.id, l.title, l."orderIndex", l."videoUrl", (lp.id IS NOT NULL) as "isCompleted" FROM "Lesson" l LEFT JOIN "Enrollment" e ON l."courseId" = e."courseId" AND e."userId" = %s LEFT JOIN "LessonProgress" lp ON l.id = lp."lessonId" AND e.id = lp."enrollmentId" WHERE l."courseId" = %s ORDER BY l."orderIndex" ASC;'
         cur.execute(query, (current_user.id, str(course_id)))
-        course_details["lessons"] = [{"id": r[0], "title": r[1], "orderIndex": r[2], "videoUrl": r[3], "isCompleted": r[4]} for r in cur.fetchall()]
+        
+        lessons = []
+        for r in cur.fetchall():
+            lessons.append({
+                "id": r[0], "title": r[1], "orderIndex": r[2],
+                "videoUrl": generate_signed_url(r[3]),
+                "isCompleted": r[4]
+            })
+        course_details["lessons"] = lessons
         return course_details
     finally:
         cur.close()
