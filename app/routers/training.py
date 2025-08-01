@@ -32,34 +32,43 @@ router = APIRouter(prefix="/training", tags=["Formación"])
 # --- Funciones Auxiliares ---
 def generate_signed_url(blob_url: str) -> str:
     """
-    Genera una URL firmada y temporal para un archivo privado en GCS.
-    Si falla o no está configurado, devuelve la URL original o None.
+    Genera una URL firmada y temporal para un archivo privado en GCS,
+    añadiendo un parámetro para evitar problemas de caché del navegador.
     """
     if not storage_client or not blob_url or not blob_url.startswith(f"https://storage.googleapis.com/{BUCKET_NAME}/"):
-        return blob_url # Devuelve la URL base si no se puede firmar
+        return blob_url
 
     try:
         bucket = storage_client.bucket(BUCKET_NAME)
         blob_name = blob_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
         blob = bucket.blob(blob_name)
         
-        # La URL será válida por 1 hora, suficiente para ver un video.
-        url = blob.generate_signed_url(version="v4", expiration=datetime.timedelta(hours=1), method="GET")
-        return url
+        expiration_time = datetime.timedelta(hours=1)
+        
+        signed_url = blob.generate_signed_url(
+            version="v4",
+            expiration=expiration_time,
+            method="GET"
+        )
+        
+        # --- SOLUCIÓN DE CACHÉ ---
+        # Se añade un timestamp para forzar al navegador a recargar el recurso
+        # en lugar de usar una versión en caché que podría tener permisos antiguos.
+        cache_buster = f"&t={int(datetime.datetime.now().timestamp())}"
+        
+        return signed_url + cache_buster
     except Exception as e:
         print(f"Error al generar URL firmada para {blob_url}: {e}")
-        return blob_url # Devuelve la URL base en caso de error
+        return blob_url
 
 def delete_blob_from_gcs(blob_url: str):
     """
-    Elimina un archivo de Google Cloud Storage a partir de su URL pública.
-    Está diseñado para no detener la ejecución si falla, solo imprime un error.
+    Elimina un archivo de Google Cloud Storage a partir de su URL base.
     """
     if not storage_client or not blob_url or not blob_url.startswith(f"https://storage.googleapis.com/{BUCKET_NAME}/"):
         return
     try:
         bucket = storage_client.bucket(BUCKET_NAME)
-        # Extrae el nombre del archivo (blob) desde la URL completa.
         blob_name = blob_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
         blob = bucket.blob(blob_name)
         if blob.exists():
@@ -79,14 +88,15 @@ def create_course(
     image: UploadFile = File(None),
     current_admin: UserInDB = Depends(get_current_admin)
 ):
-    """Crea un nuevo curso con título, descripción e imagen de portada opcional. Requiere permisos de administrador."""
+    """Crea un nuevo curso. Requiere permisos de administrador."""
     image_url = None
     if image and storage_client:
         image_blob_name = f"course-images/{uuid.uuid4()}-{image.filename}"
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(image_blob_name)
         blob.upload_from_file(image.file, content_type=image.content_type)
-        image_url = blob.public_url
+        # Se guarda la URL base, no la pública, ya que el objeto es privado.
+        image_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{image_blob_name}"
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -118,7 +128,7 @@ def upload_lesson(
     bucket = storage_client.bucket(BUCKET_NAME)
     blob = bucket.blob(video_blob_name)
     blob.upload_from_file(video.file, content_type=video.content_type)
-    video_url = blob.public_url
+    video_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{video_blob_name}"
 
     conn = get_db_connection()
     cur = conn.cursor()
