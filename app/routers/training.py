@@ -7,7 +7,6 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, status
 from typing import List
 from google.cloud import storage
-from google.oauth2 import service_account
 
 # --- Importaciones de la aplicación ---
 from app.utils.auth_utils import get_current_admin, get_current_active_user, UserInDB
@@ -17,15 +16,15 @@ from app.routers.auth import get_db_connection
 # Se inicializan las variables para que existan en el ámbito del módulo.
 storage_client = None
 BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
-credentials = None
 
 try:
-    # Se cargan las credenciales desde la variable de entorno.
+    # --- MÉTODO CONSISTENTE CON TU PROYECTO ---
+    # Se utiliza el método de carga de credenciales que ya funciona en otras partes de tu aplicación.
+    # Esto garantiza que la autenticación sea idéntica en todo el backend.
     credentials_json_str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
     if credentials_json_str:
         service_account_info = json.loads(credentials_json_str)
-        credentials = service_account.Credentials.from_service_account_info(service_account_info)
-        storage_client = storage.Client(credentials=credentials)
+        storage_client = storage.Client.from_service_account_info(service_account_info)
     else:
         print("ADVERTENCIA: La variable de entorno GOOGLE_APPLICATION_CREDENTIALS_JSON no está definida.")
 
@@ -45,25 +44,24 @@ def sanitize_filename(filename: str) -> str:
 
 def generate_signed_url(blob_name: str) -> str:
     """Genera una URL firmada a partir de la RUTA RELATIVA (blob_name) del archivo."""
-    if not storage_client or not blob_name or not credentials:
-        print(f"No se puede generar URL firmada. Cliente: {storage_client is not None}, Blob: {blob_name}, Creds: {credentials is not None}")
+    if not storage_client or not blob_name:
         return None
     try:
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(blob_name)
         
+        # El cliente de storage ya está autenticado, por lo que puede firmar correctamente.
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=datetime.timedelta(hours=1),
-            method="GET",
-            credentials=credentials
+            method="GET"
         )
         
         cache_buster = f"&t={int(datetime.datetime.now().timestamp())}"
         return signed_url + cache_buster
     except Exception as e:
         print(f"Error detallado al generar URL firmada para '{blob_name}': {e}")
-        raise e
+        return None
 
 def delete_blob_from_gcs(blob_name: str):
     """Elimina un archivo de GCS a partir de su RUTA RELATIVA (blob_name)."""
@@ -76,55 +74,6 @@ def delete_blob_from_gcs(blob_name: str):
             blob.delete()
     except Exception as e:
         print(f"Error al intentar eliminar el archivo {blob_name} de GCS: {e}")
-
-
-# ===============================================================
-# ================== ENDPOINT DE DIAGNÓSTICO ====================
-# ===============================================================
-
-@router.get("/admin/debug-credentials", summary="[DEBUG] Diagnóstico avanzado de credenciales")
-def debug_gcs_credentials(current_admin: UserInDB = Depends(get_current_admin)):
-    """
-    Verifica la variable de entorno y extrae el ID de la llave privada para compararlo.
-    """
-    diagnostics = {}
-    
-    # 1. Leer la variable de entorno como texto plano
-    credentials_str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-    if not credentials_str:
-        raise HTTPException(status_code=500, detail={"error": "La variable de entorno GOOGLE_APPLICATION_CREDENTIALS_JSON está vacía o no existe."})
-    
-    diagnostics["env_var_found"] = True
-    
-    # 2. Intentar parsear el JSON y extraer los datos clave
-    try:
-        credentials_data = json.loads(credentials_str)
-        diagnostics["json_is_valid"] = True
-        diagnostics["project_id"] = credentials_data.get("project_id")
-        diagnostics["client_email"] = credentials_data.get("client_email")
-        diagnostics["private_key_id"] = credentials_data.get("private_key_id") # <-- La clave del diagnóstico
-    except Exception as e:
-        diagnostics["json_is_valid"] = False
-        diagnostics["error_parsing_json"] = str(e)
-        raise HTTPException(status_code=500, detail=diagnostics)
-        
-    # 3. Verificar si el cliente de Storage se inicializó
-    diagnostics["storage_client_initialized"] = (storage_client is not None)
-    
-    # 4. Intentar generar una URL firmada para un objeto de prueba
-    # Reemplaza esto con la ruta a un archivo que SABES que existe en tu bucket.
-    test_blob_name = "course-images/fd8840f2-545a-4531-9dc2-9bccceffb74f-Captura_de_pantalla_2024-01-06_133726.png" # Ejemplo
-    diagnostics["test_blob_name"] = test_blob_name
-    try:
-        signed_url = generate_signed_url(test_blob_name)
-        diagnostics["generated_signed_url"] = signed_url
-        diagnostics["test_status"] = "ÉXITO: La URL fue generada. Intenta abrirla en el navegador."
-    except Exception as e:
-        diagnostics["generate_signed_url_error"] = str(e)
-        diagnostics["test_status"] = "FALLO: Ocurrió un error al intentar generar la URL firmada."
-        raise HTTPException(status_code=500, detail={"diagnostics": diagnostics, "error": "La generación de la URL firmada falló."})
-
-    return diagnostics
 
 
 # ===============================================================
