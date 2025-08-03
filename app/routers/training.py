@@ -14,10 +14,16 @@ from app.routers.auth import get_db_connection
 
 # --- Configuración de Servicios Externos ---
 try:
-    service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
-    storage_client = storage.Client.from_service_account_info(service_account_info)
+    # --- CAMBIO CLAVE ---
+    # Al usar "Secret Files" en Render y la variable GOOGLE_APPLICATION_CREDENTIALS,
+    # el cliente de Google Cloud encuentra la llave automáticamente.
+    # Ya no necesitamos cargar el JSON manualmente.
+    storage_client = storage.Client()
     BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
-except (json.JSONDecodeError, TypeError):
+    if not BUCKET_NAME:
+        storage_client = None # Forzar error si el nombre del bucket no está definido
+except Exception as e:
+    print(f"Error CRÍTICO al inicializar el cliente de Google Cloud Storage: {e}")
     storage_client = None
     BUCKET_NAME = None
 
@@ -27,10 +33,12 @@ router = APIRouter(prefix="/training", tags=["Formación"])
 
 # --- Funciones Auxiliares ---
 def sanitize_filename(filename: str) -> str:
+    """Limpia un nombre de archivo para que sea seguro para la URL."""
     filename = filename.replace(" ", "_")
     return re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
 
 def generate_signed_url(blob_name: str) -> str:
+    """Genera una URL firmada a partir de la RUTA RELATIVA (blob_name) del archivo."""
     if not storage_client or not blob_name:
         return None
     try:
@@ -45,6 +53,7 @@ def generate_signed_url(blob_name: str) -> str:
         return None
 
 def delete_blob_from_gcs(blob_name: str):
+    """Elimina un archivo de GCS a partir de su RUTA RELATIVA (blob_name)."""
     if not storage_client or not blob_name:
         return
     try:
@@ -59,27 +68,6 @@ def delete_blob_from_gcs(blob_name: str):
 # ===============================================================
 # ================== ENDPOINTS PARA ADMINISTRADORES ==============
 # ===============================================================
-
-# --- NUEVO ENDPOINT DE DEPURACIÓN ---
-@router.get("/admin/debug-credentials", summary="[DEBUG] Verificar credenciales de GCS")
-def debug_credentials(current_admin: UserInDB = Depends(get_current_admin)):
-    """
-    Endpoint de depuración para verificar qué credenciales de GCS se están cargando.
-    """
-    if not storage_client or not hasattr(storage_client, 'credentials'):
-        return {"error": "storage_client no está inicializado o no tiene credenciales."}
-    
-    try:
-        # Acceder a la información de la cuenta de servicio directamente desde las credenciales.
-        credentials_info = {
-            "project_id_from_client": storage_client.project,
-            "service_account_email": storage_client.credentials.service_account_email,
-            "scopes": storage_client.credentials.scopes,
-        }
-        return credentials_info
-    except Exception as e:
-        return {"error": f"No se pudieron leer las credenciales: {str(e)}"}
-
 
 @router.post("/courses", status_code=status.HTTP_201_CREATED, summary="Crear un nuevo curso")
 def create_course(
