@@ -7,25 +7,31 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, status
 from typing import List
 from google.cloud import storage
-from google.oauth2 import service_account # Importación explícita
+from google.oauth2 import service_account
 
-# --- Configuración de Servicios Externos ---
-try:
-    # Se cargan las credenciales desde la variable de entorno.
-    service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
-    # Se crea un objeto de credenciales explícito que usaremos en todo el módulo.
-    credentials = service_account.Credentials.from_service_account_info(service_account_info)
-    storage_client = storage.Client(credentials=credentials)
-    BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
-except (json.JSONDecodeError, TypeError, ValueError):
-    print("Error CRÍTICO: La variable de entorno GOOGLE_APPLICATION_CREDENTIALS_JSON no está configurada o es inválida.")
-    storage_client = None
-    BUCKET_NAME = None
-    credentials = None # Asegurarse de que esté nulo si falla
-
-# --- Importaciones de la aplicación (después de la configuración para evitar dependencias circulares) ---
+# --- Importaciones de la aplicación ---
 from app.utils.auth_utils import get_current_admin, get_current_active_user, UserInDB
 from app.routers.auth import get_db_connection
+
+# --- Configuración de Servicios Externos ---
+# Se inicializan las variables para que existan en el ámbito del módulo.
+storage_client = None
+BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
+credentials = None
+
+try:
+    # Se cargan las credenciales desde la variable de entorno.
+    credentials_json_str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if credentials_json_str:
+        service_account_info = json.loads(credentials_json_str)
+        credentials = service_account.Credentials.from_service_account_info(service_account_info)
+        storage_client = storage.Client(credentials=credentials)
+    else:
+        print("ADVERTENCIA: La variable de entorno GOOGLE_APPLICATION_CREDENTIALS_JSON no está definida.")
+
+except (json.JSONDecodeError, TypeError, ValueError) as e:
+    print(f"Error CRÍTICO al procesar las credenciales JSON: {e}")
+
 
 # --- Inicialización del Router de FastAPI ---
 router = APIRouter(prefix="/training", tags=["Formación"])
@@ -40,25 +46,24 @@ def sanitize_filename(filename: str) -> str:
 def generate_signed_url(blob_name: str) -> str:
     """Genera una URL firmada a partir de la RUTA RELATIVA (blob_name) del archivo."""
     if not storage_client or not blob_name or not credentials:
+        print(f"No se puede generar URL firmada. Cliente: {storage_client is not None}, Blob: {blob_name}, Creds: {credentials is not None}")
         return None
     try:
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(blob_name)
         
-        # --- CAMBIO CLAVE: Se pasa explícitamente la credencial para firmar ---
-        # Esto elimina cualquier ambigüedad sobre qué llave se está usando.
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=datetime.timedelta(hours=1),
             method="GET",
-            credentials=credentials # Forzar el uso de nuestras credenciales cargadas
+            credentials=credentials
         )
         
         cache_buster = f"&t={int(datetime.datetime.now().timestamp())}"
         return signed_url + cache_buster
     except Exception as e:
-        print(f"Error al generar URL firmada para {blob_name}: {e}")
-        return None
+        print(f"Error detallado al generar URL firmada para '{blob_name}': {e}")
+        raise e
 
 def delete_blob_from_gcs(blob_name: str):
     """Elimina un archivo de GCS a partir de su RUTA RELATIVA (blob_name)."""
@@ -71,6 +76,55 @@ def delete_blob_from_gcs(blob_name: str):
             blob.delete()
     except Exception as e:
         print(f"Error al intentar eliminar el archivo {blob_name} de GCS: {e}")
+
+
+# ===============================================================
+# ================== ENDPOINT DE DIAGNÓSTICO ====================
+# ===============================================================
+
+@router.get("/admin/debug-credentials", summary="[DEBUG] Diagnóstico avanzado de credenciales")
+def debug_gcs_credentials(current_admin: UserInDB = Depends(get_current_admin)):
+    """
+    Verifica la variable de entorno y extrae el ID de la llave privada para compararlo.
+    """
+    diagnostics = {}
+    
+    # 1. Leer la variable de entorno como texto plano
+    credentials_str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if not credentials_str:
+        raise HTTPException(status_code=500, detail={"error": "La variable de entorno GOOGLE_APPLICATION_CREDENTIALS_JSON está vacía o no existe."})
+    
+    diagnostics["env_var_found"] = True
+    
+    # 2. Intentar parsear el JSON y extraer los datos clave
+    try:
+        credentials_data = json.loads(credentials_str)
+        diagnostics["json_is_valid"] = True
+        diagnostics["project_id"] = credentials_data.get("project_id")
+        diagnostics["client_email"] = credentials_data.get("client_email")
+        diagnostics["private_key_id"] = credentials_data.get("private_key_id") # <-- La clave del diagnóstico
+    except Exception as e:
+        diagnostics["json_is_valid"] = False
+        diagnostics["error_parsing_json"] = str(e)
+        raise HTTPException(status_code=500, detail=diagnostics)
+        
+    # 3. Verificar si el cliente de Storage se inicializó
+    diagnostics["storage_client_initialized"] = (storage_client is not None)
+    
+    # 4. Intentar generar una URL firmada para un objeto de prueba
+    # Reemplaza esto con la ruta a un archivo que SABES que existe en tu bucket.
+    test_blob_name = "course-images/fd8840f2-545a-4531-9dc2-9bccceffb74f-Captura_de_pantalla_2024-01-06_133726.png" # Ejemplo
+    diagnostics["test_blob_name"] = test_blob_name
+    try:
+        signed_url = generate_signed_url(test_blob_name)
+        diagnostics["generated_signed_url"] = signed_url
+        diagnostics["test_status"] = "ÉXITO: La URL fue generada. Intenta abrirla en el navegador."
+    except Exception as e:
+        diagnostics["generate_signed_url_error"] = str(e)
+        diagnostics["test_status"] = "FALLO: Ocurrió un error al intentar generar la URL firmada."
+        raise HTTPException(status_code=500, detail={"diagnostics": diagnostics, "error": "La generación de la URL firmada falló."})
+
+    return diagnostics
 
 
 # ===============================================================
@@ -141,17 +195,10 @@ def upload_lesson(
 
 @router.get("/admin/courses", summary="Listar todos los cursos para el panel de admin")
 def admin_list_courses(current_admin: UserInDB = Depends(get_current_admin)):
-    """Devuelve una lista de todos los cursos con el número de estudiantes inscritos."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        query = """
-        SELECT c.id, c.title, c.description, c."imageUrl", COUNT(e.id) as student_count
-        FROM "Course" c
-        LEFT JOIN "Enrollment" e ON c.id = e."courseId"
-        GROUP BY c.id
-        ORDER BY c."createdAt" DESC;
-        """
+        query = 'SELECT c.id, c.title, c.description, c."imageUrl", COUNT(e.id) as student_count FROM "Course" c LEFT JOIN "Enrollment" e ON c.id = e."courseId" GROUP BY c.id ORDER BY c."createdAt" DESC;'
         cur.execute(query)
         return [{"id": r[0], "title": r[1], "description": r[2], "imageUrl": r[3], "studentCount": r[4]} for r in cur.fetchall()]
     finally:
@@ -160,7 +207,6 @@ def admin_list_courses(current_admin: UserInDB = Depends(get_current_admin)):
 
 @router.get("/admin/courses/{course_id}/enrollments", summary="Ver inscripciones de un curso")
 def admin_get_enrollments(course_id: uuid.UUID, current_admin: UserInDB = Depends(get_current_admin)):
-    """Devuelve los detalles de los usuarios inscritos en un curso específico."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -173,7 +219,6 @@ def admin_get_enrollments(course_id: uuid.UUID, current_admin: UserInDB = Depend
 
 @router.get("/admin/courses/{course_id}/lessons", summary="Ver lecciones de un curso")
 def admin_get_lessons(course_id: uuid.UUID, current_admin: UserInDB = Depends(get_current_admin)):
-    """Devuelve la lista de lecciones de un curso específico."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -186,35 +231,25 @@ def admin_get_lessons(course_id: uuid.UUID, current_admin: UserInDB = Depends(ge
 
 @router.delete("/admin/courses/{course_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar un curso")
 def admin_delete_course(course_id: uuid.UUID, current_admin: UserInDB = Depends(get_current_admin)):
-    """Elimina un curso, sus lecciones, inscripciones y todos los archivos asociados en GCS."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute('SELECT "imageUrl" FROM "Course" WHERE id = %s', (str(course_id),))
-        image_url_to_delete = (cur.fetchone() or [None])[0]
-
+        image_blob_to_delete = (cur.fetchone() or [None])[0]
         cur.execute('SELECT "videoUrl" FROM "Lesson" WHERE "courseId" = %s', (str(course_id),))
-        video_urls_to_delete = [row[0] for row in cur.fetchall()]
-
+        video_blobs_to_delete = [row[0] for row in cur.fetchall()]
         cur.execute('DELETE FROM "Course" WHERE id = %s', (str(course_id),))
-        if cur.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Curso no encontrado")
+        if cur.rowcount == 0: raise HTTPException(status_code=404, detail="Curso no encontrado")
         conn.commit()
-
-        if image_url_to_delete: delete_blob_from_gcs(image_url_to_delete)
-        for video_url in video_urls_to_delete: delete_blob_from_gcs(video_url)
-        
+        if image_blob_to_delete: delete_blob_from_gcs(image_blob_to_delete)
+        for video_blob in video_blobs_to_delete: delete_blob_from_gcs(video_blob)
         return
-    except Exception as e:
-        if conn: conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error al eliminar el curso: {e}")
     finally:
         if cur: cur.close()
         if conn: conn.close()
 
 @router.put("/admin/lessons/{lesson_id}", summary="Editar una lección")
 def admin_edit_lesson(lesson_id: uuid.UUID, title: str = Form(...), order_index: int = Form(...), current_admin: UserInDB = Depends(get_current_admin)):
-    """Actualiza el título y el orden de una lección existente."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -228,16 +263,15 @@ def admin_edit_lesson(lesson_id: uuid.UUID, title: str = Form(...), order_index:
 
 @router.delete("/admin/lessons/{lesson_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar una lección")
 def admin_delete_lesson(lesson_id: uuid.UUID, current_admin: UserInDB = Depends(get_current_admin)):
-    """Elimina una lección específica y su video asociado de GCS."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute('SELECT "videoUrl" FROM "Lesson" WHERE id = %s', (str(lesson_id),))
-        video_url_to_delete = (cur.fetchone() or [None])[0]
+        video_blob_to_delete = (cur.fetchone() or [None])[0]
         cur.execute('DELETE FROM "Lesson" WHERE id = %s', (str(lesson_id),))
         if cur.rowcount == 0: raise HTTPException(status_code=404, detail="Lección no encontrada")
         conn.commit()
-        if video_url_to_delete: delete_blob_from_gcs(video_url_to_delete)
+        if video_blob_to_delete: delete_blob_from_gcs(video_blob_to_delete)
         return
     finally:
         cur.close()
@@ -245,7 +279,6 @@ def admin_delete_lesson(lesson_id: uuid.UUID, current_admin: UserInDB = Depends(
 
 @router.get("/admin/lessons/{lesson_id}/signed-url", summary="Obtener URL de descarga de video")
 def admin_get_lesson_download_url(lesson_id: uuid.UUID, current_admin: UserInDB = Depends(get_current_admin)):
-    """Genera una URL firmada (temporal y segura) para descargar un video."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -253,11 +286,9 @@ def admin_get_lesson_download_url(lesson_id: uuid.UUID, current_admin: UserInDB 
         video_url = (cur.fetchone() or [None])[0]
         if not video_url: raise HTTPException(status_code=404, detail="Video no encontrado")
         if not storage_client: raise HTTPException(status_code=500, detail="Servicio de almacenamiento no configurado.")
-
         bucket = storage_client.bucket(BUCKET_NAME)
-        blob_name = video_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
+        blob_name = video_url
         blob = bucket.blob(blob_name)
-        
         signed_url = blob.generate_signed_url(version="v4", expiration=datetime.timedelta(minutes=15), method="GET")
         return {"url": signed_url}
     finally:
@@ -271,7 +302,6 @@ def admin_get_lesson_download_url(lesson_id: uuid.UUID, current_admin: UserInDB 
 
 @router.get("/courses", summary="Listar cursos para un usuario")
 def list_all_courses(current_user: UserInDB = Depends(get_current_active_user)):
-    """Devuelve todos los cursos, con URLs de imagen firmadas."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -291,19 +321,15 @@ def list_all_courses(current_user: UserInDB = Depends(get_current_active_user)):
 
 @router.get("/courses/{course_id}/details", summary="Ver el detalle de un curso")
 def get_course_details_for_user(course_id: uuid.UUID, current_user: UserInDB = Depends(get_current_active_user)):
-    """Obtiene los detalles de un curso, con URLs de video firmadas."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute('SELECT id, title, description FROM "Course" WHERE id = %s', (str(course_id),))
         course_data = cur.fetchone()
         if not course_data: raise HTTPException(status_code=404, detail="Curso no encontrado")
-        
         course_details = {"id": course_data[0], "title": course_data[1], "description": course_data[2]}
-
         query = 'SELECT l.id, l.title, l."orderIndex", l."videoUrl", (lp.id IS NOT NULL) as "isCompleted" FROM "Lesson" l LEFT JOIN "Enrollment" e ON l."courseId" = e."courseId" AND e."userId" = %s LEFT JOIN "LessonProgress" lp ON l.id = lp."lessonId" AND e.id = lp."enrollmentId" WHERE l."courseId" = %s ORDER BY l."orderIndex" ASC;'
         cur.execute(query, (current_user.id, str(course_id)))
-        
         lessons = []
         for r in cur.fetchall():
             lessons.append({
@@ -319,7 +345,6 @@ def get_course_details_for_user(course_id: uuid.UUID, current_user: UserInDB = D
 
 @router.post("/enroll/{course_id}", summary="Inscribirse a un curso")
 def enroll_in_course(course_id: uuid.UUID, current_user: UserInDB = Depends(get_current_active_user)):
-    """Inscribe al usuario actual en un curso."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -335,28 +360,20 @@ def enroll_in_course(course_id: uuid.UUID, current_user: UserInDB = Depends(get_
 
 @router.post("/lessons/{lesson_id}/complete", summary="Marcar una lección como completada")
 def complete_lesson(lesson_id: uuid.UUID, current_user: UserInDB = Depends(get_current_active_user)):
-    """Marca una lección como completada y recalcula el progreso del curso."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute('SELECT e.id, e."courseId" FROM "Enrollment" e JOIN "Lesson" l ON e."courseId" = l."courseId" WHERE e."userId" = %s AND l.id = %s', (current_user.id, str(lesson_id)))
         enrollment_data = cur.fetchone()
         if not enrollment_data: raise HTTPException(status_code=403, detail="No estás inscrito en el curso de esta lección.")
-        
         enrollment_id, course_id = enrollment_data
-
         cur.execute('INSERT INTO "LessonProgress" ("enrollmentId", "lessonId") VALUES (%s, %s) ON CONFLICT DO NOTHING', (enrollment_id, str(lesson_id)))
-        
         cur.execute('SELECT COUNT(id) FROM "Lesson" WHERE "courseId" = %s', (course_id,))
         total_lessons = cur.fetchone()[0]
-        
         cur.execute('SELECT COUNT(id) FROM "LessonProgress" WHERE "enrollmentId" = %s', (enrollment_id,))
         completed_lessons = cur.fetchone()[0]
-
         progress = int((completed_lessons / total_lessons) * 100) if total_lessons > 0 else 0
-
         cur.execute('UPDATE "Enrollment" SET progress = %s WHERE id = %s', (progress, enrollment_id))
-        
         conn.commit()
         return {"message": "Progreso actualizado", "newProgress": progress}
     except Exception as e:
