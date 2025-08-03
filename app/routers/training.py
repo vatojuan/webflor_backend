@@ -57,13 +57,10 @@ def generate_signed_url(blob_name: str) -> str:
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(blob_name)
         
-        # --- CAMBIO CLAVE: Se pasa explícitamente la credencial para firmar ---
-        # Esto elimina cualquier ambigüedad sobre qué llave se está usando.
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=datetime.timedelta(hours=1),
             method="GET",
-            credentials=credentials
         )
         
         cache_buster = f"&t={int(datetime.datetime.now().timestamp())}"
