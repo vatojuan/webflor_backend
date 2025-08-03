@@ -7,24 +7,25 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, status
 from typing import List
 from google.cloud import storage
-
-# --- Importaciones de la aplicación ---
-from app.utils.auth_utils import get_current_admin, get_current_active_user, UserInDB
-from app.routers.auth import get_db_connection
+from google.oauth2 import service_account # Importación explícita
 
 # --- Configuración de Servicios Externos ---
 try:
-    # --- MÉTODO CONSISTENTE ---
-    # Se vuelve a utilizar el método que usa el resto de tu proyecto,
-    # cargando las credenciales directamente desde la variable de entorno JSON.
+    # Se cargan las credenciales desde la variable de entorno.
     service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
-    storage_client = storage.Client.from_service_account_info(service_account_info)
+    # Se crea un objeto de credenciales explícito que usaremos en todo el módulo.
+    credentials = service_account.Credentials.from_service_account_info(service_account_info)
+    storage_client = storage.Client(credentials=credentials)
     BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
 except (json.JSONDecodeError, TypeError, ValueError):
-    # Este error ahora es consistente con el resto de tu app.
     print("Error CRÍTICO: La variable de entorno GOOGLE_APPLICATION_CREDENTIALS_JSON no está configurada o es inválida.")
     storage_client = None
     BUCKET_NAME = None
+    credentials = None # Asegurarse de que esté nulo si falla
+
+# --- Importaciones de la aplicación (después de la configuración para evitar dependencias circulares) ---
+from app.utils.auth_utils import get_current_admin, get_current_active_user, UserInDB
+from app.routers.auth import get_db_connection
 
 # --- Inicialización del Router de FastAPI ---
 router = APIRouter(prefix="/training", tags=["Formación"])
@@ -38,13 +39,21 @@ def sanitize_filename(filename: str) -> str:
 
 def generate_signed_url(blob_name: str) -> str:
     """Genera una URL firmada a partir de la RUTA RELATIVA (blob_name) del archivo."""
-    if not storage_client or not blob_name:
+    if not storage_client or not blob_name or not credentials:
         return None
     try:
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(blob_name)
-        expiration_time = datetime.timedelta(hours=1)
-        signed_url = blob.generate_signed_url(version="v4", expiration=expiration_time, method="GET")
+        
+        # --- CAMBIO CLAVE: Se pasa explícitamente la credencial para firmar ---
+        # Esto elimina cualquier ambigüedad sobre qué llave se está usando.
+        signed_url = blob.generate_signed_url(
+            version="v4",
+            expiration=datetime.timedelta(hours=1),
+            method="GET",
+            credentials=credentials # Forzar el uso de nuestras credenciales cargadas
+        )
+        
         cache_buster = f"&t={int(datetime.datetime.now().timestamp())}"
         return signed_url + cache_buster
     except Exception as e:
