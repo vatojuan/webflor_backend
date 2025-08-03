@@ -14,16 +14,15 @@ from app.routers.auth import get_db_connection
 
 # --- Configuración de Servicios Externos ---
 try:
-    # --- CAMBIO CLAVE ---
-    # Al usar "Secret Files" en Render y la variable GOOGLE_APPLICATION_CREDENTIALS,
-    # el cliente de Google Cloud encuentra la llave automáticamente.
-    # Ya no necesitamos cargar el JSON manualmente.
-    storage_client = storage.Client()
+    # --- MÉTODO CONSISTENTE ---
+    # Se vuelve a utilizar el método que usa el resto de tu proyecto,
+    # cargando las credenciales directamente desde la variable de entorno JSON.
+    service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
+    storage_client = storage.Client.from_service_account_info(service_account_info)
     BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
-    if not BUCKET_NAME:
-        storage_client = None # Forzar error si el nombre del bucket no está definido
-except Exception as e:
-    print(f"Error CRÍTICO al inicializar el cliente de Google Cloud Storage: {e}")
+except (json.JSONDecodeError, TypeError, ValueError):
+    # Este error ahora es consistente con el resto de tu app.
+    print("Error CRÍTICO: La variable de entorno GOOGLE_APPLICATION_CREDENTIALS_JSON no está configurada o es inválida.")
     storage_client = None
     BUCKET_NAME = None
 
@@ -76,8 +75,11 @@ def create_course(
     image: UploadFile = File(None),
     current_admin: UserInDB = Depends(get_current_admin)
 ):
+    if not storage_client:
+        raise HTTPException(status_code=503, detail="Servicio de almacenamiento no configurado correctamente.")
+    
     image_blob_name = None
-    if image and storage_client:
+    if image:
         safe_filename = sanitize_filename(image.filename)
         image_blob_name = f"course-images/{uuid.uuid4()}-{safe_filename}"
         bucket = storage_client.bucket(BUCKET_NAME)
