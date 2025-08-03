@@ -7,6 +7,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, status
 from typing import List
 from google.cloud import storage
+from google.oauth2 import service_account
 
 # --- Importaciones de la aplicación ---
 from app.utils.auth_utils import get_current_admin, get_current_active_user, UserInDB
@@ -16,15 +17,17 @@ from app.routers.auth import get_db_connection
 # Se inicializan las variables para que existan en el ámbito del módulo.
 storage_client = None
 BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
+credentials = None
 
 try:
     # --- MÉTODO CONSISTENTE CON TU PROYECTO ---
-    # Se utiliza el método de carga de credenciales que ya funciona en otras partes de tu aplicación.
-    # Esto garantiza que la autenticación sea idéntica en todo el backend.
+    # Se carga la información de la cuenta de servicio desde la variable de entorno JSON.
     credentials_json_str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
     if credentials_json_str:
         service_account_info = json.loads(credentials_json_str)
-        storage_client = storage.Client.from_service_account_info(service_account_info)
+        # Se crea un objeto de credenciales explícito que usaremos para firmar.
+        credentials = service_account.Credentials.from_service_account_info(service_account_info)
+        storage_client = storage.Client(credentials=credentials)
     else:
         print("ADVERTENCIA: La variable de entorno GOOGLE_APPLICATION_CREDENTIALS_JSON no está definida.")
 
@@ -43,25 +46,31 @@ def sanitize_filename(filename: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
 
 def generate_signed_url(blob_name: str) -> str:
-    """Genera una URL firmada a partir de la RUTA RELATIVA (blob_name) del archivo."""
-    if not storage_client or not blob_name:
+    """
+    Genera una URL firmada a partir de la RUTA RELATIVA (blob_name) del archivo,
+    usando explícitamente las credenciales cargadas.
+    """
+    if not storage_client or not blob_name or not credentials:
+        print(f"No se puede generar URL firmada. Cliente: {storage_client is not None}, Blob: {blob_name}, Creds: {credentials is not None}")
         return None
     try:
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(blob_name)
         
-        # El cliente de storage ya está autenticado, por lo que puede firmar correctamente.
+        # --- CAMBIO CLAVE: Se pasa explícitamente la credencial para firmar ---
+        # Esto elimina cualquier ambigüedad sobre qué llave se está usando.
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=datetime.timedelta(hours=1),
-            method="GET"
+            method="GET",
+            credentials=credentials
         )
         
         cache_buster = f"&t={int(datetime.datetime.now().timestamp())}"
         return signed_url + cache_buster
     except Exception as e:
         print(f"Error detallado al generar URL firmada para '{blob_name}': {e}")
-        return None
+        return None # Devolver None en caso de error para evitar URLs rotas.
 
 def delete_blob_from_gcs(blob_name: str):
     """Elimina un archivo de GCS a partir de su RUTA RELATIVA (blob_name)."""
