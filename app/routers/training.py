@@ -3,83 +3,83 @@ import json
 import uuid
 import datetime
 import psycopg2
+import re
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, status
 from typing import List
 from google.cloud import storage
 
 # --- Importaciones de la aplicación ---
-# Se importan las dependencias de autenticación y el modelo de usuario.
 from app.utils.auth_utils import get_current_admin, get_current_active_user, UserInDB
-# Se reutiliza la función de conexión a la base de datos para mantener consistencia.
 from app.routers.auth import get_db_connection
 
 # --- Configuración de Servicios Externos ---
 try:
-    # Carga de credenciales de Google Cloud Storage desde variables de entorno.
     service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
     storage_client = storage.Client.from_service_account_info(service_account_info)
     BUCKET_NAME = os.getenv("GOOGLE_STORAGE_BUCKET")
 except (json.JSONDecodeError, TypeError):
-    # Si las credenciales no están configuradas, los servicios que las usan fallarán de forma controlada.
     storage_client = None
     BUCKET_NAME = None
 
 # --- Inicialización del Router de FastAPI ---
-# Se define un prefijo y una etiqueta para agrupar todas las rutas de este módulo en la documentación.
 router = APIRouter(prefix="/training", tags=["Formación"])
 
 
 # --- Funciones Auxiliares ---
-def generate_signed_url(blob_url: str) -> str:
-    """
-    Genera una URL firmada y temporal para un archivo privado en GCS,
-    añadiendo un parámetro para evitar problemas de caché del navegador.
-    """
-    if not storage_client or not blob_url or not blob_url.startswith(f"https://storage.googleapis.com/{BUCKET_NAME}/"):
-        return blob_url
+def sanitize_filename(filename: str) -> str:
+    filename = filename.replace(" ", "_")
+    return re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
 
+def generate_signed_url(blob_name: str) -> str:
+    if not storage_client or not blob_name:
+        return None
     try:
         bucket = storage_client.bucket(BUCKET_NAME)
-        blob_name = blob_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
         blob = bucket.blob(blob_name)
-        
         expiration_time = datetime.timedelta(hours=1)
-        
-        signed_url = blob.generate_signed_url(
-            version="v4",
-            expiration=expiration_time,
-            method="GET"
-        )
-        
-        # --- SOLUCIÓN DE CACHÉ ---
-        # Se añade un timestamp para forzar al navegador a recargar el recurso
-        # en lugar de usar una versión en caché que podría tener permisos antiguos.
+        signed_url = blob.generate_signed_url(version="v4", expiration=expiration_time, method="GET")
         cache_buster = f"&t={int(datetime.datetime.now().timestamp())}"
-        
         return signed_url + cache_buster
     except Exception as e:
-        print(f"Error al generar URL firmada para {blob_url}: {e}")
-        return blob_url
+        print(f"Error al generar URL firmada para {blob_name}: {e}")
+        return None
 
-def delete_blob_from_gcs(blob_url: str):
-    """
-    Elimina un archivo de Google Cloud Storage a partir de su URL base.
-    """
-    if not storage_client or not blob_url or not blob_url.startswith(f"https://storage.googleapis.com/{BUCKET_NAME}/"):
+def delete_blob_from_gcs(blob_name: str):
+    if not storage_client or not blob_name:
         return
     try:
         bucket = storage_client.bucket(BUCKET_NAME)
-        blob_name = blob_url.replace(f"https://storage.googleapis.com/{BUCKET_NAME}/", "")
         blob = bucket.blob(blob_name)
         if blob.exists():
             blob.delete()
     except Exception as e:
-        print(f"Error al intentar eliminar el archivo {blob_url} de GCS: {e}")
+        print(f"Error al intentar eliminar el archivo {blob_name} de GCS: {e}")
 
 
 # ===============================================================
 # ================== ENDPOINTS PARA ADMINISTRADORES ==============
 # ===============================================================
+
+# --- NUEVO ENDPOINT DE DEPURACIÓN ---
+@router.get("/admin/debug-credentials", summary="[DEBUG] Verificar credenciales de GCS")
+def debug_credentials(current_admin: UserInDB = Depends(get_current_admin)):
+    """
+    Endpoint de depuración para verificar qué credenciales de GCS se están cargando.
+    """
+    if not storage_client or not hasattr(storage_client, 'credentials'):
+        return {"error": "storage_client no está inicializado o no tiene credenciales."}
+    
+    try:
+        # Acceder a la información de la cuenta de servicio directamente desde las credenciales.
+        credentials_info = {
+            "project_id_from_client": storage_client.project,
+            "service_account_email": storage_client.credentials.service_account_email,
+            "scopes": storage_client.credentials.scopes,
+        }
+        return credentials_info
+    except Exception as e:
+        return {"error": f"No se pudieron leer las credenciales: {str(e)}"}
+
 
 @router.post("/courses", status_code=status.HTTP_201_CREATED, summary="Crear un nuevo curso")
 def create_course(
@@ -88,22 +88,20 @@ def create_course(
     image: UploadFile = File(None),
     current_admin: UserInDB = Depends(get_current_admin)
 ):
-    """Crea un nuevo curso. Requiere permisos de administrador."""
-    image_url = None
+    image_blob_name = None
     if image and storage_client:
-        image_blob_name = f"course-images/{uuid.uuid4()}-{image.filename}"
+        safe_filename = sanitize_filename(image.filename)
+        image_blob_name = f"course-images/{uuid.uuid4()}-{safe_filename}"
         bucket = storage_client.bucket(BUCKET_NAME)
         blob = bucket.blob(image_blob_name)
         blob.upload_from_file(image.file, content_type=image.content_type)
-        # Se guarda la URL base, no la pública, ya que el objeto es privado.
-        image_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{image_blob_name}"
 
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute(
             'INSERT INTO "Course" (title, description, "imageUrl", "createdBy") VALUES (%s, %s, %s, %s) RETURNING id',
-            (title, description, image_url, current_admin.id)
+            (title, description, image_blob_name, current_admin.id)
         )
         course_id = cur.fetchone()[0]
         conn.commit()
@@ -120,25 +118,24 @@ def upload_lesson(
     video: UploadFile = File(...),
     current_admin: UserInDB = Depends(get_current_admin)
 ):
-    """Sube un video como una lección para un curso existente."""
     if not storage_client:
         raise HTTPException(status_code=500, detail="El servicio de almacenamiento no está configurado.")
 
-    video_blob_name = f"course-videos/{course_id}/{uuid.uuid4()}-{video.filename}"
+    safe_filename = sanitize_filename(video.filename)
+    video_blob_name = f"course-videos/{course_id}/{uuid.uuid4()}-{safe_filename}"
     bucket = storage_client.bucket(BUCKET_NAME)
     blob = bucket.blob(video_blob_name)
     blob.upload_from_file(video.file, content_type=video.content_type)
-    video_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{video_blob_name}"
 
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute(
             'INSERT INTO "Lesson" ("courseId", title, "videoUrl", "orderIndex") VALUES (%s, %s, %s, %s)',
-            (str(course_id), title, video_url, order_index)
+            (str(course_id), title, video_blob_name, order_index)
         )
         conn.commit()
-        return {"message": "Lección añadida exitosamente", "videoUrl": video_url}
+        return {"message": "Lección añadida exitosamente"}
     finally:
         cur.close()
         conn.close()
