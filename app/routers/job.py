@@ -22,6 +22,8 @@ import traceback
 from datetime import datetime
 from types import SimpleNamespace
 from typing import List, Optional, Tuple, Dict, Any
+from pgvector.psycopg2 import register_vector
+
 
 import requests
 from dotenv import load_dotenv
@@ -65,7 +67,8 @@ def get_current_admin_sub(tok: str = Depends(oauth2_admin)) -> str:
 # ─────────────────── DB helpers ──────────────────────
 def get_admin_id_by_email(mail: str) -> Optional[int]:
     conn = get_db_connection()
-    cur = conn.cursor()
+    register_vector(conn)
+    cur  = conn.cursor()
     try:
         cur.execute('SELECT id FROM "User" WHERE email=%s LIMIT 1;', (mail,))
         row = cur.fetchone()
