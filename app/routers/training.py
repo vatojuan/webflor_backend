@@ -195,6 +195,7 @@ def get_course_details_for_user(course_id: uuid.UUID, current_user: UserInDB = D
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        # Datos básicos del curso
         cur.execute('SELECT id, title, description FROM "Course" WHERE id = %s', (str(course_id),))
         course_data = cur.fetchone()
         if not course_data:
@@ -206,6 +207,14 @@ def get_course_details_for_user(course_id: uuid.UUID, current_user: UserInDB = D
             "description": course_data[2],
         }
 
+        # Progreso del usuario en este curso
+        cur.execute(
+            'SELECT progress FROM "Enrollment" WHERE "courseId" = %s AND "userId" = %s',
+            (str(course_id), current_user.id),
+        )
+        course_details["progress"] = (cur.fetchone() or [0])[0]
+
+        # Lecciones + estado de cada una
         query = '''
             SELECT l.id, l.title, l."orderIndex", l."videoUrl",
                    (lp.id IS NOT NULL) as "isCompleted"
