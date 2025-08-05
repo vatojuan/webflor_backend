@@ -424,7 +424,12 @@ async def get_job(job_id: int = Path(..., description="ID de la oferta")):
 
 @router.post("/create", status_code=status.HTTP_201_CREATED, summary="Crear oferta (empleador)")
 async def create_job(data: Dict[str, Any], current_user=Depends(get_current_user)):
-    job_id, _ = _insert_job(data, owner_id=current_user.id, source="employer")
+    job_id, _ = _insert_job(
+        data,
+        owner_id=current_user.id,
+        source="employer",
+        label_default="automatic"  # ✅ Etiqueta automática para empleadores
+    )
     return {"message": "Oferta creada", "jobId": job_id}
 
 @router.delete("/delete/{job_id}", summary="Eliminar una oferta (empleador)")
