@@ -309,7 +309,7 @@ async def confirm_apply(token: str = Path(..., description="Token enviado por em
 
         # Buscar el token en la tabla matches
         cur.execute("""
-            SELECT id, job_id, applicant_id, apply_token_used
+            SELECT id, job_id, user_id, apply_token_used
               FROM matches
              WHERE apply_token = %s
              LIMIT 1
