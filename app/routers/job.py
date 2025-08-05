@@ -427,6 +427,34 @@ async def create_job(data: Dict[str, Any], current_user=Depends(get_current_user
     job_id, _ = _insert_job(data, owner_id=current_user.id, source="employer")
     return {"message": "Oferta creada", "jobId": job_id}
 
+@router.delete("/delete/{job_id}", summary="Eliminar una oferta (empleador)")
+async def delete_job(
+    job_id: int = Path(..., description="ID de la oferta"),
+    current_user=Depends(get_current_user)
+):
+    conn = cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Verificar que la oferta le pertenece al usuario
+        cur.execute('SELECT id FROM "Job" WHERE id=%s AND "userId"=%s', (job_id, current_user.id))
+        if not cur.fetchone():
+            raise HTTPException(status_code=403, detail="No tienes permiso para eliminar esta oferta")
+
+        # Eliminar la oferta
+        cur.execute('DELETE FROM "Job" WHERE id = %s', (job_id,))
+        conn.commit()
+        return {"message": "Oferta eliminada correctamente"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail="Error al eliminar oferta")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
 
 @router.post(
     "/create-admin",
