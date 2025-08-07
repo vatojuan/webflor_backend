@@ -85,7 +85,7 @@ def send_confirmation_email(user_email: str, confirmation_code: str):
     body = (
         f"Hola,<br><br>"
         f"¡Gracias por registrarte! Para completar tu registro y activar tu cuenta, por favor haz clic en el siguiente enlace:<br><br>"
-        f'<a href="https://fapmendoza.online/cv/confirm?code={confirmation_code}" style="background-color: #007bff; color: white; padding: 12px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Activar mi cuenta</a><br><br>'
+        f'<a href="https://fapmendoza.online/api/cv/confirm?code={confirmation_code}" style="background-color: #007bff; color: white; padding: 12px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Activar mi cuenta</a><br><br>'
         f"Si no solicitaste este registro, puedes ignorar este mensaje.<br><br>"
         f"Saludos,<br>El equipo de FAP Mendoza"
     )
