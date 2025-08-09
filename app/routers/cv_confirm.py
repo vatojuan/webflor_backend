@@ -54,7 +54,8 @@ def generate_secure_password(length=12):
     hashed = bcrypt.hashpw(plain_password.encode('utf-8'), bcrypt.gensalt())
     return plain_password, hashed.decode('utf-8')
 
-router = APIRouter(prefix="/api/cv", tags=["cv"])
+# ⬅️ IMPORTANTE: con root_path="/api", el prefijo del router debe ser SOLO "/cv"
+router = APIRouter(prefix="/cv", tags=["cv"])
 
 def extract_text_from_pdf(pdf_bytes):
     """Extrae el texto completo de un PDF dado en bytes."""
@@ -74,8 +75,6 @@ def extract_phone(text):
     3. Selección del candidato más probable basado en un sistema de puntuación.
     """
     # 1. BÚSQUEDA AMPLIA DE CANDIDATOS
-    # Busca secuencias que contengan dígitos, espacios y caracteres comunes de teléfono.
-    # Se buscan secuencias de entre 8 y 25 caracteres para ser flexibles.
     potential_candidates = re.findall(r'[\d\s\-\(\)\+]{8,25}', text)
     
     # Añade búsquedas cerca de palabras clave para darles prioridad.
@@ -88,8 +87,6 @@ def extract_phone(text):
     for candidate in potential_candidates:
         cleaned_candidate = candidate.strip()
         digits_only = re.sub(r'\D', '', cleaned_candidate)
-
-        # --- Filtros de descarte ---
 
         # Filtro 1: Longitud de dígitos. Un teléfono válido en Argentina tiene entre 8 y 13 dígitos.
         if not (8 <= len(digits_only) <= 13):
@@ -108,25 +105,22 @@ def extract_phone(text):
             continue
 
         # Filtro 5: Descartar si está cerca de palabras como DNI, Legajo, etc.
-        # Se busca en una ventana de 20 caracteres alrededor del candidato.
         pos = text.find(cleaned_candidate)
         if pos != -1:
             context = text[max(0, pos-20):pos+len(cleaned_candidate)+20]
             if re.search(r'\b(DNI|CUIT|CUIL|Legajo|Matr[íi]cula)\b', context, re.IGNORECASE):
                 continue
 
-        # Filtro 6: Descartar si tiene demasiados separadores (más de 4), es poco probable que sea un teléfono.
+        # Filtro 6: Demasiados separadores -> poco probable que sea un teléfono.
         if len(re.findall(r'[\s\-]', cleaned_candidate)) > 4:
             continue
 
-        # Si pasa todos los filtros, se considera un teléfono válido.
         valid_phones.append(cleaned_candidate)
 
     if not valid_phones:
         return None
 
     # 3. SELECCIÓN DEL MEJOR CANDIDATO
-    # Se da una puntuación más alta a los números con una longitud más típica (10-13 dígitos).
     def score(p):
         digits = len(re.sub(r'\D', '', p))
         if 10 <= digits <= 13:
@@ -134,7 +128,6 @@ def extract_phone(text):
         return digits # Menor prioridad para números más cortos
 
     best_phone = max(set(valid_phones), key=score)
-    
     return best_phone.strip()
 
 
@@ -239,11 +232,10 @@ def run_regeneration_for_all_users():
                     if e.status_code == 429:
                         print("❌❌ ERROR CRÍTICO: Cuota de OpenAI excedida. Deteniendo la tarea de regeneración. ❌❌")
                         print("Por favor, revisa tu plan y facturación en platform.openai.com.")
-                        # Detiene el bucle for completamente si la cuota se agota.
                         break 
                     else:
                         print(f"❌ ERROR de API de OpenAI procesando al usuario {user_id}: {e}. Saltando al siguiente usuario.")
-                        continue # Salta al siguiente usuario si es otro tipo de error de API
+                        continue 
 
                 cur.execute(
                     'UPDATE "User" SET name = %s, description = %s, phone = %s, embedding = %s WHERE id = %s',
@@ -266,6 +258,8 @@ def run_regeneration_for_all_users():
         if conn: conn.close()
         print("\n🏁 TAREA DE REGENERACIÓN DE PERFILES FINALIZADA 🏁")
 
+# Acepta con y sin barra final
+@router.post("/regenerate-all-profiles")
 @router.post("/regenerate-all-profiles/")
 async def regenerate_all_profiles(background_tasks: BackgroundTasks):
     """
@@ -275,6 +269,8 @@ async def regenerate_all_profiles(background_tasks: BackgroundTasks):
     background_tasks.add_task(run_regeneration_for_all_users)
     return {"message": "El proceso de regeneración de perfiles ha comenzado en segundo plano. Revisa los logs del servidor para ver el progreso."}
 
+# Acepta con y sin barra final
+@router.get("/confirm")
 @router.get("/confirm/")
 async def confirm_email(code: str = Query(...)):
     """
