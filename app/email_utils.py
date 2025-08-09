@@ -31,6 +31,10 @@ SMTP_USER: Final[str | None] = os.getenv("SMTP_USER")
 SMTP_PASS: Final[str | None] = os.getenv("SMTP_PASS")
 SMTP_TIMEOUT: Final[int] = int(os.getenv("SMTP_TIMEOUT", 20))
 
+# Base pública para links que deben ser abiertos en el sitio (sin /api)
+# Podés setear PUBLIC_WEB_BASE_URL en tu .env si cambiás dominio.
+PUBLIC_WEB_BASE_URL: Final[str] = os.getenv("PUBLIC_WEB_BASE_URL", "https://fapmendoza.online")
+
 # Email del administrador para recibir alertas del sistema.
 ADMIN_EMAIL: Final[str | None] = os.getenv("ADMIN_EMAIL")
 
@@ -38,7 +42,7 @@ ADMIN_EMAIL: Final[str | None] = os.getenv("ADMIN_EMAIL")
 
 def send_email(to_email: str, subject: str, body: str, *, html: bool = True) -> bool:
     """
-    Envía un correo electrónico de manera robusta.
+    Envía a un correo electrónico de manera robusta.
 
     - Se conecta de forma segura usando STARTTLS (puerto 587) o SSL (puerto 465).
     - Lanza excepciones en caso de error para que el llamador pueda manejarlas.
@@ -82,10 +86,12 @@ def send_email(to_email: str, subject: str, body: str, *, html: bool = True) -> 
 def send_confirmation_email(user_email: str, confirmation_code: str):
     """(1) Envía el email para que el usuario confirme su cuenta."""
     subject = "Confirma tu email para activar tu cuenta en FAP Mendoza"
+    # Importante: usar la base pública SIN /api
+    confirm_url = f"{PUBLIC_WEB_BASE_URL}/cv/confirm?code={confirmation_code}"
     body = (
         f"Hola,<br><br>"
         f"¡Gracias por registrarte! Para completar tu registro y activar tu cuenta, por favor haz clic en el siguiente enlace:<br><br>"
-        f'<a href="https://fapmendoza.online/api/cv/confirm?code={confirmation_code}" style="background-color: #007bff; color: white; padding: 12px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Activar mi cuenta</a><br><br>'
+        f'<a href="{confirm_url}" style="background-color: #007bff; color: white; padding: 12px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Activar mi cuenta</a><br><br>'
         f"Si no solicitaste este registro, puedes ignorar este mensaje.<br><br>"
         f"Saludos,<br>El equipo de FAP Mendoza"
     )
