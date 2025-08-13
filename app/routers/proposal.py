@@ -1,7 +1,7 @@
 # app/routers/proposal.py
 ############################################################
 # Gestión de propuestas (postulaciones) y su ciclo de vida.
-# Versión robustecida contra diferencias de esquema - 09-ago-2025
+# Versión robustecida contra diferencias de esquema – 13-ago-2025
 ############################################################
 
 from __future__ import annotations
@@ -52,12 +52,41 @@ def db() -> psycopg2.extensions.connection:
     conn.autocommit = False
     return conn
 
+# ─────────────────── Helpers tolerantes de esquema ───────────────────
+
+def _fetch_job(cur, job_id: int) -> dict | None:
+    """Obtiene *todas* las columnas de Job y resuelve claves snake/camel en Python.
+    Evita hacer referencia a columnas inexistentes en SQL (previene errores como contactPhone)."""
+    cur.execute('SELECT * FROM "Job" WHERE id = %s', (job_id,))
+    row = cur.fetchone()
+    return row
+
+
+def _job_contact_email(job: dict, employer_email: str = "") -> str:
+    return (job.get("contact_email")
+            or job.get("contactEmail")
+            or employer_email
+            or "")
+
+
+def _job_contact_phone(job: dict, employer_phone: str = "") -> str:
+    return (job.get("contact_phone")
+            or job.get("contactPhone")
+            or employer_phone
+            or "")
+
+
+def _fetch_user(cur, user_id: int) -> dict | None:
+    cur.execute('SELECT * FROM "User" WHERE id = %s', (user_id,))
+    return cur.fetchone()
+
+
 # ─────────────────── Lógica Principal de Envío (Deliver) ───────────────────
 def deliver(proposal_id: int, sleep_first: bool) -> None:
     """
     Procesa y envía una única propuesta al empleador.
     Toda la lógica de email se delega a email_utils.
-    Soporta esquemas camelCase y snake_case en Job/User.
+    Tolerante a esquemas snake_case y camelCase en Job/User.
     """
     if sleep_first:
         logger.info(f"⏳ Esperando {AUTO_DELAY}s para procesar propuesta {proposal_id}")
@@ -77,30 +106,17 @@ def deliver(proposal_id: int, sleep_first: bool) -> None:
         if not proposal_data:
             logger.warning(f"Propuesta {proposal_id} no encontrada al intentar enviarla.")
             return
-        
+
         status = proposal_data['status']
         job_id = proposal_data['job_id']
         applicant_id = proposal_data['applicant_id']
-        
+
         if (sleep_first and status != "waiting") or (not sleep_first and status != "sending"):
             logger.info(f"Envío de propuesta {proposal_id} omitido. Estado actual: {status}")
             return
 
-        # 2) Info de la oferta (tolerante al esquema)
-        cur.execute(
-            '''
-            SELECT
-                title,
-                label,
-                contact_email,
-                COALESCE("contactPhone", contact_phone) AS contact_phone,
-                COALESCE("userId", user_id)           AS owner_id
-            FROM "Job"
-            WHERE id = %s
-            ''',
-            (job_id,)
-        )
-        job_info = cur.fetchone()
+        # 2) Info de la oferta (SIN referenciar columnas inexistentes)
+        job_info = _fetch_job(cur, job_id)
         if not job_info:
             note = f"Oferta {job_id} no encontrada."
             cur2 = conn.cursor()
@@ -113,25 +129,12 @@ def deliver(proposal_id: int, sleep_first: bool) -> None:
             )
             return
 
-        job_title      = job_info['title']
-        job_label      = job_info['label']
-        contact_email  = job_info['contact_email']
-        contact_phone  = job_info['contact_phone']
-        owner_id       = job_info['owner_id']
+        job_title = job_info.get('title') or ''
+        job_label = job_info.get('label') or 'manual'
+        owner_id  = job_info.get('user_id') or job_info.get('userId')
 
         # 3) Info del postulante (tolerante al esquema)
-        cur.execute(
-            '''
-            SELECT
-                name,
-                email,
-                COALESCE("cvUrl", cv_url) AS cv_url
-            FROM "User"
-            WHERE id = %s
-            ''',
-            (applicant_id,)
-        )
-        applicant_info = cur.fetchone()
+        applicant_info = _fetch_user(cur, applicant_id)
         if not applicant_info:
             note = f"Postulante {applicant_id} no encontrado."
             cur2 = conn.cursor()
@@ -144,24 +147,22 @@ def deliver(proposal_id: int, sleep_first: bool) -> None:
             )
             return
 
-        applicant_name  = applicant_info['name']
-        applicant_email = applicant_info['email']
-        cv_url          = applicant_info['cv_url']
+        applicant_name  = applicant_info.get('name') or ''
+        applicant_email = applicant_info.get('email') or ''
+        cv_url          = applicant_info.get('cv_url') or applicant_info.get('cvUrl') or ''
 
         # 4) Info del empleador dueño de la oferta
         employer_name = employer_email = employer_phone = ""
         if owner_id:
-            cur.execute(
-                'SELECT name, email, phone FROM "User" WHERE id = %s',
-                (owner_id,)
-            )
-            employer_data = cur.fetchone()
+            employer_data = _fetch_user(cur, owner_id)
             if employer_data:
                 employer_name  = employer_data.get('name')  or ""
                 employer_email = employer_data.get('email') or ""
                 employer_phone = employer_data.get('phone') or ""
 
-        final_contact_email = contact_email or employer_email
+        # Email/teléfono final de contacto (con fallback a owner)
+        final_contact_email = _job_contact_email(job_info, employer_email)
+        final_contact_phone = _job_contact_phone(job_info, employer_phone)
 
         # 5) Validar email de destino
         if not final_contact_email:
@@ -174,7 +175,10 @@ def deliver(proposal_id: int, sleep_first: bool) -> None:
             logger.error(f"❗ Propuesta {proposal_id} falló: {error_note}")
             send_admin_alert(
                 subject="Fallo en envío de Propuesta (Sin Email)",
-                details=f"La propuesta ID {proposal_id} para la oferta '{job_title}' (ID {job_id}) no pudo enviarse por falta de email de contacto."
+                details=(
+                    f"La propuesta ID {proposal_id} para la oferta '{job_title}' (ID {job_id}) "
+                    f"no pudo enviarse por falta de email de contacto."
+                )
             )
             return
 
@@ -184,12 +188,11 @@ def deliver(proposal_id: int, sleep_first: bool) -> None:
             "applicant_email": applicant_email,
             "job_title":       job_title,
             "employer_name":   employer_name,
-            "cv_url":          cv_url or "",
+            "cv_url":          cv_url,
         }
-        
+
         send_proposal_to_employer(final_contact_email, context)
-        
-        final_contact_phone = contact_phone or employer_phone
+
         if final_contact_phone:
             logger.info(f"📲 (Simulado) WhatsApp a {final_contact_phone}: Nueva propuesta para «{job_title}».")
         else:
@@ -204,7 +207,7 @@ def deliver(proposal_id: int, sleep_first: bool) -> None:
         if conn:
             conn.rollback()
         logger.exception(f"Error crítico al procesar la propuesta {proposal_id}: {e}")
-        
+
         # Intento de marcar error en la propuesta
         try:
             conn_err = db(); cur_err = conn_err.cursor()
@@ -263,10 +266,10 @@ def create(data: dict, bg: BackgroundTasks):
             else:
                 raise HTTPException(status_code=409, detail="Ya has postulado a este empleo.")
 
-        # Determinar etiqueta para estado inicial
-        cur.execute('SELECT label FROM "Job" WHERE id = %s', (job_id,))
-        label = (cur.fetchone() or {"label": "manual"})['label'] or "manual"
-        
+        # Determinar etiqueta para estado inicial (no referenciamos columnas inexistentes)
+        job_info = _fetch_job(cur, job_id)
+        label = (job_info.get('label') if job_info else None) or "manual"
+
         status = "waiting" if label == "automatic" else "pending"
         cur.execute(
             "INSERT INTO proposals (job_id, applicant_id, label, status, created_at) VALUES (%s, %s, %s, %s, NOW()) RETURNING id",
@@ -280,14 +283,15 @@ def create(data: dict, bg: BackgroundTasks):
         if label == "automatic":
             bg.add_task(deliver, proposal_id, True)
 
-        cur.execute('SELECT title FROM "Job" WHERE id = %s', (job_id,))
-        job_title = cur.fetchone()['title']
-        cur.execute('SELECT name, email FROM "User" WHERE id = %s', (applicant_id,))
-        user_info = cur.fetchone()
-        
-        if user_info and user_info['email']:
-            context = {"applicant_name": user_info['name'], "job_title": job_title}
-            bg.add_task(send_cancellation_warning, user_info['email'], context)
+        if job_info:
+            job_title = job_info.get('title') or ''
+        else:
+            job_title = ''
+        applicant_info = _fetch_user(cur, applicant_id)
+
+        if applicant_info and applicant_info.get('email'):
+            context = {"applicant_name": applicant_info.get('name') or '', "job_title": job_title}
+            bg.add_task(send_cancellation_warning, applicant_info['email'], context)
 
         return {"proposal_id": proposal_id}
 
@@ -331,7 +335,7 @@ def send_manual(proposal_id: int, bg: BackgroundTasks):
             conn.close()
         except Exception:
             pass
-    
+
     bg.add_task(deliver, proposal_id, sleep_first=False)
     return {"message": "Propuesta encolada para envío inmediato."}
 
@@ -351,7 +355,7 @@ def cancel(data: dict):
             raise HTTPException(status_code=404, detail="La propuesta no existe.")
         if st not in ("waiting", "pending"):
             raise HTTPException(status_code=400, detail=f"No se puede cancelar una propuesta en estado '{st}'.")
-        
+
         cur.execute("UPDATE proposals SET status='cancelled', cancelled_at=NOW() WHERE id=%s", (proposal_id,))
         conn.commit()
         logger.info(f"🚫 Propuesta {proposal_id} cancelada por el usuario.")
@@ -394,28 +398,50 @@ def list_proposals():
     try:
         conn = db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Corrección: j.contact_email (snake_case) + fallback al email del owner
+
+        # Traemos datos básicos y dejamos el cálculo de contacto en Python para evitar columnas inexistentes.
         cur.execute("""
             SELECT
               p.id, p.label, p.status, p.notes,
               p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Argentina/Buenos_Aires' AS created_at,
               p.sent_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Argentina/Buenos_Aires' AS sent_at,
               p.cancelled_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Argentina/Buenos_Aires' AS cancelled_at,
-              j.id AS job_id,
-              j.title AS job_title,
-              u.id AS applicant_id,
+              j.*,                       -- ← todas las columnas de Job
+              u.id   AS applicant_id,
               u.name AS applicant_name,
               u.email AS applicant_email,
-              COALESCE(j.contact_email, emp.email) AS job_contact_email
+              emp.email AS employer_email,
+              emp.phone AS employer_phone
             FROM proposals p
             JOIN "Job" j ON p.job_id = j.id
             JOIN "User" u ON p.applicant_id = u.id
-            LEFT JOIN "User" emp ON j."userId" = emp.id
+            LEFT JOIN "User" emp ON (j."userId" = emp.id OR j.user_id = emp.id)
             ORDER BY p.created_at DESC
         """)
-        proposals = cur.fetchall()
-        return {"proposals": proposals}
+        rows = cur.fetchall() or []
+
+        # Normalizamos el contacto en Python (sin romper si falta contactEmail/contact_email)
+        result = []
+        for r in rows:
+            job_contact_email = _job_contact_email(r, r.get('employer_email') or '')
+            job_contact_phone = _job_contact_phone(r, r.get('employer_phone') or '')
+            result.append({
+                'id': r['id'],
+                'label': r.get('label'),
+                'status': r.get('status'),
+                'notes': r.get('notes'),
+                'created_at': r.get('created_at'),
+                'sent_at': r.get('sent_at'),
+                'cancelled_at': r.get('cancelled_at'),
+                'job_id': r.get('id_1') if 'id_1' in r else r.get('job_id') or r.get('id'),  # compat para aliasing
+                'job_title': r.get('title'),
+                'applicant_id': r.get('applicant_id'),
+                'applicant_name': r.get('applicant_name'),
+                'applicant_email': r.get('applicant_email'),
+                'job_contact_email': job_contact_email,
+                'job_contact_phone': job_contact_phone,
+            })
+        return {"proposals": result}
     except Exception as e:
         logger.exception("Error al listar las propuestas.")
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {e}")
